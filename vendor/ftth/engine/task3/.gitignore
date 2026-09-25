@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地运行成果；公开样例成果保留在 example_output/
+outputs/
+*_verify/

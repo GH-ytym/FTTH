@@ -1,0 +1,15 @@
+[general]
+name=FTTH 连续规划智能体
+qgisMinimumVersion=3.34
+qgisMaximumVersion=4.99
+description=基础与场勘成果直接接入；可选导入遥感识别结果，AI需求辅助、任务2至6连续规划、八图层展示与完整成果校验。
+version=2.4.2
+author=FTTH 项目组
+about=QGIS 常驻侧栏连续规划系统。算法2至6以 FTTH(4).zip 的 run_pipeline.py 为流程基准并保持核心算法源码完整性；IMB、SITE、PTECH、INFRASTRUCTURE及可选识别道路均来自同一项目批次，运行中不注入任务模板示例记录。插件逐级校验分区、设施、管路、光缆和最终八图层的数据来源；大模型只辅助运行参数、工程假设和结果诊断。
+category=Vector
+icon=icon.svg
+experimental=False
+deprecated=False
+hasProcessingProvider=False
+tracker=
+repository=

@@ -1,0 +1,11 @@
+{
+  "interface_version": "task5.fiber-link.v1",
+  "task_id": "task5_task6_conduit_fiber_links",
+  "operation": "plan_hierarchical_fiber_links",
+  "input": {
+    "task6_plan": "../OutPut/Task6/production/layered_plan_optimized.json"
+  },
+  "output": {
+    "directory": "../OutPut/Task5/production"
+  }
+}

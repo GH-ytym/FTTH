@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "task": "task6_layered_fixed_assignment_plan",
+    "coordinate_system": "WGS84 longitude/latitude",
+    "scenario": "inline layered-planning smoke test"
+  },
+  "planning": {
+    "algorithm": "layered_fixed_assignment_shared_edge_search",
+    "candidate_paths": 3,
+    "default_edge_capacity": 200,
+    "road_cost_per_m": 1.0,
+    "water_cost_factor": 2.0
+  },
+  "task2_partition": {
+    "zpm": {
+      "clusters": [
+        {
+          "id": "ZPM-1",
+          "capacity_limit": 100,
+          "members": [{"id": "IMB-1", "ports": 20}]
+        }
+      ]
+    }
+  },
+  "nro_sites": [{"id": "NRO-1", "x": 0.0, "y": 0.0}],
+  "pm_sites": [{"id": "PM-1", "zpm_id": "ZPM-1", "x": 0.003, "y": 0.0, "community_id": "COMM-1"}],
+  "building_groups": [{"id": "GROUP-1", "x": 0.006, "y": 0.0, "pm_id": "PM-1"}],
+  "buildings": [
+    {
+      "id": "BLDG-1",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0.0067, 0.0007], [0.0074, 0.0007], [0.0074, 0.0014], [0.0067, 0.0014], [0.0067, 0.0007]]]
+      }
+    }
+  ],
+  "entrances": [
+    {"id": "COMM-ENTRY-1", "x": 0.001, "y": 0.0, "entrance_type": "community_entrance", "community_id": "COMM-1"},
+    {"id": "GROUP-ENTRY-1", "x": 0.005, "y": 0.0, "entrance_type": "building_group_entrance", "group_id": "GROUP-1"},
+    {"id": "BLDG-ENTRY-1", "x": 0.0072, "y": 0.001, "entrance_type": "building_entrance", "building_id": "BLDG-1"}
+  ],
+  "roads": [
+    {
+      "id": "ROAD-1",
+      "coordinates": [{"x": 0.0, "y": 0.0}, {"x": 0.005, "y": 0.0}, {"x": 0.008, "y": 0.0}]
+    }
+  ],
+  "water_cost_zones": [
+    {
+      "id": "WATER-1",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0.0015, -0.0002], [0.002, -0.0002], [0.002, 0.0002], [0.0015, 0.0002], [0.0015, -0.0002]]]
+      }
+    }
+  ],
+  "bpe_plan": [
+    {"id": "BPE-1", "x": 0.007, "y": 0.001, "building_id": "BLDG-1", "group_id": "GROUP-1", "demand": 20}
+  ],
+  "pbo_plan": [
+    {"id": "PBO-1", "x": 0.0072, "y": 0.001, "building_id": "BLDG-1", "bpe_id": "BPE-1", "demand": 20}
+  ],
+  "imb_points": [
+    {"id": "IMB-1", "x": 0.0072, "y": 0.001, "ports": 20, "pm_id": "PM-1"}
+  ]
+}

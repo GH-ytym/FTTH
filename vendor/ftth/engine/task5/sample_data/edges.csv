@@ -1,0 +1,13 @@
+edge_id,from_node,to_node,length_m,capacity,used_capacity,status,cost_factor
+E001,NRO01,J01,480,96,12,available,1.00
+E002,J01,J02,520,72,8,available,1.00
+E003,J02,PM01,610,72,8,available,1.10
+E004,PM01,BPE01,430,48,4,available,1.00
+E005,BPE01,PBO01,380,24,0,available,1.00
+E006,NRO01,J03,460,96,10,available,1.00
+E007,J03,J04,690,72,6,available,1.15
+E008,J04,BPE02,520,48,4,available,1.00
+E009,BPE02,PBO02,410,24,0,available,1.00
+E010,J02,J04,780,36,30,available,1.40
+E011,PM01,J04,850,48,44,available,1.30
+E012,J01,J03,300,24,24,full,1.00

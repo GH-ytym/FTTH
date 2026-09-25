@@ -1,0 +1,444 @@
+import asyncio
+import contextvars
+import copy
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from .models import Parameters, RunInput
+from .settings import ROOT, VENDOR
+from .store import uid
+from .progress import algorithm_step
+from .instance_lock import DataDirectoryLock
+from .models import PolicyInput
+from .titles import valid_title, fallback_title
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def write_json(path, value):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_result(output, prefix):
+    for line in reversed(output.splitlines()):
+        if line.startswith(prefix):
+            return json.loads(line[len(prefix):])
+    return {"status": "failed", "errors": ["工作进程未返回结构化结果，请查看运行日志"]}
+
+
+def run_summary(run):
+    result = run.get("result") or {}
+    summary = {k: result[k] for k in ("status", "phase", "errors", "warnings", "output_dir", "report", "input_summary", "region_counts") if k in result}
+    if run.get("kind") == "export":
+        for key in ("geopackage", "shape_dir", "tables_dir", "maps_dir", "manifest", "validation_report", "validation", "task6_route_filter", "file_count"):
+            if key in result:
+                summary[key] = result[key]
+        root = Path(result["output_dir"]) if result.get("output_dir") else None
+        summary["files"] = []
+        for item in result.get("files", []):
+            path = Path(item["path"])
+            name = str(path.relative_to(root)) if root and path.is_relative_to(root) else str(path)
+            summary["files"].append({"path": name, "size_bytes": item.get("size_bytes")})
+    return {**{k: v for k, v in run.items() if k != "result"},
+            "result": summary}
+
+
+class Service:
+    def __init__(self, settings, store):
+        self.settings, self.store = settings, store
+        self.instance_lock = DataDirectoryLock(settings.data)
+        self.queue = asyncio.Lock()
+        self.tasks = set()
+        self.processes = {}
+        self.on_complete = None
+        for run in store.all("run"):
+            if run["status"] in ("queued", "running"):
+                run.update(status="interrupted", error="后端已重启；原任务不自动重跑")
+                store.put("run", run)
+        for message in store.all("message"):
+            if message["status"] in ("queued", "running"):
+                message.update(status="interrupted")
+                store.put("message", message)
+        for session in store.all("session"):
+            if session.get("title") != "新对话" and not valid_title(session.get("title")):
+                first = next((m for m in store.all("message") if m["session_id"] == session["id"] and not m.get("notification")), None)
+                if first:
+                    session["title"] = fallback_title(first["content"])
+                    store.put("session", session)
+
+    def spawn(self, coro):
+        # A detached job must not inherit the submitting LangChain run's callbacks.
+        task = asyncio.create_task(coro, context=contextvars.Context())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
+
+    async def close(self):
+        try:
+            for task in list(self.tasks):
+                task.cancel()
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        finally:
+            self.instance_lock.close()
+
+    def set_policy(self, session_id, policy):
+        with self.store.lock:
+            session = self.store.get("session", session_id)
+            if not session.get("project_id"):
+                raise ValueError("请先为此会话登记数据，再保存工程策略")
+            session.update(policy=policy.model_dump(), policy_confirmed_at=time.time())
+            return self.store.put("session", session)
+
+    def authorize_agent(self, session_id, message_id, parameters=None):
+        message = self.store.get("message", message_id)
+        session = self.store.get("session", session_id)
+        if message["session_id"] != session_id or message.get("notification") or not message.get("allow_actions"):
+            raise ValueError("本条消息为检查与讨论模式，不能提交规划或导出。需要执行时，请在输入框选择‘允许执行’后发送。")
+        if not message.get("project_id") or message["project_id"] != session.get("project_id"):
+            raise ValueError("消息提交时未绑定此项目数据，请登记后重新发送执行请求")
+        for name in PolicyInput.model_fields:
+            if parameters and parameters.get(name) and not session.get("policy", {}).get(name):
+                raise ValueError("尚未确认工程策略：" + name + "。请在数据页勾选并保存本会话策略；模型不能代替用户确认。")
+
+    def owned_run(self, session_id, run_id):
+        run = self.store.get("run", run_id)
+        if run["session_id"] != session_id:
+            raise ValueError("运行不属于当前会话")
+        return run
+
+    async def register(self, spec):
+        directory = self.settings.data / "projects" / uid("project")
+        directory.mkdir(parents=True)
+        source_config = Path(spec.config_path).resolve(strict=True)
+        config = read_json(source_config)
+        hashes = {}
+        for i, layer in enumerate(config.get("vector_layers", [])):
+            if layer.get("source_type") == "empty":
+                continue
+            source = Path(layer["source"])
+            if not source.is_absolute():
+                source = source_config.parent / source
+            source = source.resolve(strict=True)
+            dest = directory / "sources" / str(i)
+            dest.mkdir(parents=True)
+            files = [source.with_suffix(ext) for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix")] if source.suffix.lower() == ".shp" else [source]
+            for file in files:
+                if file.is_file():
+                    target = dest / file.name
+                    shutil.copy2(file, target)
+                    hashes[str(target.relative_to(directory))] = hashlib.sha256(target.read_bytes()).hexdigest()
+            layer["source"] = str(dest / source.name)
+        config["rasters"] = []
+        config["output"].update(quality_report=str(directory / "quality.json"), geopackage=str(directory / "base.gpkg"), add_to_project=False, capture_screenshot=False)
+        config["task2_topology"]["output_json"] = str(directory / "topology.json")
+        config_path = directory / "config.json"
+        write_json(config_path, config)
+        hashes["config.json"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        recognition = None
+        if spec.recognition_path:
+            recognition = str(directory / "recognition.gpkg")
+            shutil.copy2(Path(spec.recognition_path).resolve(strict=True), recognition)
+            hashes["recognition.gpkg"] = hashlib.sha256(Path(recognition).read_bytes()).hexdigest()
+        code, output = await self.process([str(ROOT / "scripts/qgis_worker.py"), "inspect", str(config_path)], directory / "inspect.log")
+        summary = parse_result(output, "DEMO_RESULT=")
+        if code or summary.get("status") != "success":
+            raise ValueError("；".join(summary.get("errors", ["数据登记失败"])))
+        project = {"id": directory.name, "name": spec.name, "config_path": str(config_path), "recognition_path": recognition,
+                   "summary": summary, "hashes": hashes, "created": time.time()}
+        write_json(directory / "snapshot.json", project)
+        return self.store.put("project", project)
+
+    def session(self, project_id=None):
+        if project_id:
+            self.store.get("project", project_id)
+        return self.store.put("session", {"id": uid("session"), "project_id": project_id, "title": "新对话", "created": time.time(), "updated": time.time()})
+
+    def bind_project(self, session_id, project_id):
+        session = self.store.get("session", session_id)
+        self.store.get("project", project_id)
+        if session.get("project_id") and session["project_id"] != project_id:
+            raise ValueError("该会话已绑定其他数据，请新建会话")
+        session["project_id"] = project_id
+        return self.store.put("session", session)
+
+    def inspect(self, session_id):
+        session = self.store.get("session", session_id)
+        if not session.get("project_id"):
+            return {"project_id": None, "error": "尚未登记项目数据，可先对话；执行规划前请在数据页登记输入。"}
+        project = self.store.get("project", session["project_id"])
+        return {"project_id": project["id"], "name": project["name"], **project["summary"]}
+
+    def resolve(self, session_id, request):
+        session = self.store.get("session", session_id)
+        if not session.get("project_id"):
+            raise ValueError("尚未登记项目数据，请先在数据页登记输入")
+        values = Parameters().model_dump()
+        scope = request.scope or "full"
+        if request.base_run_id:
+            base = self.owned_run(session_id, request.base_run_id)
+            if base.get("kind") != "planning":
+                raise ValueError("只能继承规划任务")
+            values = copy.deepcopy(base["parameters"])
+            scope = request.scope or base["scope"]
+        values.update(request.parameter_overrides)
+        parameters = Parameters.model_validate(values).model_dump()
+        project = self.store.get("project", session["project_id"])
+        return project, scope, parameters
+
+    def verify_snapshot(self, project):
+        directory = Path(project["config_path"]).parent
+        for relative, expected in project["hashes"].items():
+            file = directory / relative
+            if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != expected:
+                raise ValueError("输入快照已改变，请重新登记数据：" + relative)
+
+    def validate(self, session_id, request):
+        project, scope, p = self.resolve(session_id, request)
+        summary = project["summary"]
+        errors = []
+        if not summary["imb_count"]:
+            errors.append("缺少 IMB 需求点")
+        if p["spatial_weight"] == p["pipe_weight"] == 0:
+            errors.append("空间权重和管线权重不能同时为零")
+        if scope == "full":
+            if summary["nro_count"] != 1:
+                errors.append(f"完整规划需要且只能有一个 NRO，当前 {summary['nro_count']} 个")
+            if not (p["use_formal_infrastructure"] and summary["infrastructure_count"] or p["use_recognition_roads"] and project["recognition_path"]):
+                errors.append("需选择有实际数据的正式基础设施或识别道路作为路由来源")
+            if not p["split_oversized_imbs"]:
+                errors.append("当前算法的完整规划必须显式同意超过48端口的IMB按服务单元拆分（split_oversized_imbs=true）；即使当前未发现超限楼栋也要求确认此策略，实际仅拆分超限楼栋。仅分区不要求此确认。")
+        if p["use_recognition_roads"] and not project["recognition_path"]:
+            errors.append("未登记识别结果 GPKG")
+        return {"valid": not errors, "errors": errors, "scope": scope, "parameters": p,
+                "warnings": ["当前算法的最终导出要求恰好两个 PM 分区；实际限制以执行报告为准。"]}
+
+    def submit(self, session_id, request, *, agent_message_id=None):
+        if agent_message_id:
+            _, _, parameters = self.resolve(session_id, request)
+            self.authorize_agent(session_id, agent_message_id, parameters)
+        existing = self.store.dedup(session_id, "run:" + request.request_id)
+        if existing:
+            return self.owned_run(session_id, existing)
+        checked = self.validate(session_id, request)
+        if not checked["valid"]:
+            raise ValueError("；".join(checked["errors"]))
+        project, scope, p = self.resolve(session_id, request)
+        run = {"id": uid("run"), "session_id": session_id, "project_id": project["id"], "kind": "planning",
+               "status": "queued", "scope": scope, "parameters": p, "base_run_id": request.base_run_id, "created": time.time()}
+        self.store.put("run", run)
+        self.store.dedup(session_id, "run:" + request.request_id, run["id"])
+        self.store.event(session_id, "run", run_id=run["id"], status="queued")
+        self.spawn(self.execute(run["id"]))
+        return run
+
+    async def kill(self, proc):
+        if proc.returncode is not None:
+            return
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(proc.pid), "/T", "/F", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                                                          creationflags=subprocess.CREATE_NO_WINDOW)
+            await killer.wait()
+        else:
+            proc.kill()
+        await proc.wait()
+
+    async def process(self, args, log, run_id=None):
+        if run_id and self.store.get("run", run_id)["status"] == "cancelled":
+            return -1, ""
+        creation = asyncio.create_task(asyncio.create_subprocess_exec(str(self.settings.qgis / "bin/python.exe"), *args,
+            env=self.settings.worker_env(), cwd=str(VENDOR), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=4 * 1024 * 1024,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {})))
+        try:
+            proc = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            proc = await creation
+            await self.kill(proc)
+            raise
+        if run_id:
+            self.processes[run_id] = proc
+        chunks = []
+        current_stage = None
+        stage_started = time.monotonic()
+        async def consume():
+            nonlocal current_stage, stage_started
+            with Path(log).open("w", encoding="utf-8") as handle:
+                async for raw in proc.stdout:
+                    text = raw.decode("utf-8", errors="replace")
+                    handle.write(text)
+                    handle.flush()
+                    chunks.append(text)
+                    if run_id and text.startswith("[bridge]"):
+                        run = self.store.get("run", run_id)
+                        step = algorithm_step(text)
+                        if step and step != current_stage:
+                            now = time.monotonic()
+                            if current_stage:
+                                self.store.event(run["session_id"], "algorithm", run_id=run_id, **current_stage,
+                                    status="finished", elapsed_seconds=round(now - stage_started, 1))
+                            current_stage, stage_started = step, now
+                            run["current_algorithm"] = step
+                            self.store.put("run", run)
+                            self.store.event(run["session_id"], "algorithm", run_id=run_id, **step, status="running")
+                        self.store.event(run["session_id"], "progress", run_id=run_id,
+                            text=step["label"] if step else "算法流程衔接中")
+            code = await proc.wait()
+            if run_id and current_stage:
+                run = self.store.get("run", run_id)
+                self.store.event(run["session_id"], "algorithm", run_id=run_id, **current_stage,
+                    status="finished" if code == 0 else "failed", elapsed_seconds=round(time.monotonic() - stage_started, 1))
+            return code
+        try:
+            if run_id and self.store.get("run", run_id)["status"] == "cancelled":
+                await self.kill(proc)
+            code = await asyncio.wait_for(consume(), self.settings.timeout)
+            return code, "".join(chunks)
+        finally:
+            await self.kill(proc)
+            if run_id:
+                self.processes.pop(run_id, None)
+
+    async def execute(self, run_id):
+        async with self.queue:
+            run = self.store.get("run", run_id)
+            if run["status"] != "queued":
+                return
+            directory = self.settings.data / "runs" / run_id
+            directory.mkdir(parents=True)
+            run.update(status="running", directory=str(directory), started=time.time())
+            self.store.put("run", run)
+            self.store.event(run["session_id"], "run", run_id=run_id, status="running")
+            try:
+                if run["kind"] == "export":
+                    source = self.owned_run(run["session_id"], run["source_run_id"])
+                    args = [str(VENDOR / "delivery_exporter.py"), "--run-dir", source["result"]["output_dir"], "--output-root", str(directory / "delivery")]
+                    prefix = "FTTH_EXPORT_RESULT="
+                else:
+                    project = self.store.get("project", run["project_id"])
+                    self.verify_snapshot(project)
+                    write_json(directory / "input_snapshot.json", project)
+                    shutil.copy2(VENDOR / "algorithm_integrity_manifest.json", directory / "algorithm_integrity_manifest.json")
+                    write_json(directory / "request.json", run)
+                    args = [str(VENDOR / "task_bridge.py"), "--config", project["config_path"], "--output-root", str(directory / "results")]
+                    if run["scope"] == "full":
+                        args += ["--run-task3", "--run-tasks4-to6"]
+                    for key, value in run["parameters"].items():
+                        if isinstance(value, bool):
+                            if key == "ga_refine":
+                                if not value:
+                                    args.append("--no-ga-refine")
+                            elif value:
+                                args.append("--" + key.replace("_", "-"))
+                        else:
+                            args += ["--" + key.replace("_", "-"), str(value)]
+                    if project["recognition_path"]:
+                        args += ["--recognition-gpkg", project["recognition_path"]]
+                    prefix = "FTTH_BRIDGE_RESULT="
+                code, output = await self.process(args, directory / "run.log", run_id)
+                result = parse_result(output, prefix)
+                current = self.store.get("run", run_id)
+                run["current_algorithm"] = current.get("current_algorithm")
+                run.update(result=result, exit_code=code, status="succeeded" if code == 0 and result.get("status") == "success" else "failed")
+                if current["status"] == "cancelled":
+                    run["status"] = "cancelled"
+                run["metrics"] = self.metrics(result)
+            except asyncio.CancelledError:
+                run.update(status="interrupted", error="服务停止，任务中断")
+                raise
+            except Exception as exc:
+                run.update(status="failed", error=str(exc) or type(exc).__name__)
+            finally:
+                if self.store.get("run", run_id)["status"] == "cancelled":
+                    run["status"] = "cancelled"
+                run["finished"] = time.time()
+                self.store.put("run", run)
+                write_json(directory / "run.json", run)
+                self.store.event(run["session_id"], "run", run_id=run_id, status=run["status"], elapsed_seconds=round(run["finished"] - run["started"], 1))
+            if self.on_complete:
+                if run["kind"] == "planning" and run["status"] == "succeeded":
+                    self.show(run["session_id"], run["id"])
+                self.on_complete(run)
+
+    def metrics(self, result):
+        metrics = {}
+        directory = result.get("output_dir")
+        if directory:
+            for path, label, key in [("task6/layered_plan.json", "duct_route_count", "duct_routes"), ("task5/fiber_link_plan.json", "fiber_link_count", "links")]:
+                file = Path(directory) / path
+                if file.exists():
+                    value = read_json(file).get(key)
+                    if isinstance(value, list):
+                        metrics[label] = len(value)
+            counts = ((result.get("downstream") or {}).get("final_layers") or {}).get("counts", {})
+            for name, value in counts.items():
+                if isinstance(value, int):
+                    metrics["layer_count_" + name] = value
+        return metrics
+
+    async def cancel(self, session_id, run_id):
+        run = self.owned_run(session_id, run_id)
+        if run["status"] in ("queued", "running"):
+            run["status"] = "cancelled"
+            self.store.put("run", run)
+            if run_id in self.processes:
+                await self.kill(self.processes[run_id])
+            self.store.event(session_id, "run", run_id=run_id, status="cancelled")
+        return run
+
+    def compare(self, session_id, a, b):
+        left, right = self.owned_run(session_id, a), self.owned_run(session_id, b)
+        if left["status"] != "succeeded" or right["status"] != "succeeded" or left["kind"] != "planning" or right["kind"] != "planning" or left.get("scope") != right.get("scope"):
+            raise ValueError("仅可比较成功且范围相同的规划批次")
+        left["metrics"] = self.metrics(left.get("result", {})) or left.get("metrics", {})
+        right["metrics"] = self.metrics(right.get("result", {})) or right.get("metrics", {})
+        return {"left": a, "right": b, "parameter_changes": {k: [v, right["parameters"].get(k)] for k, v in left["parameters"].items() if v != right["parameters"].get(k)},
+                "metrics": {k: {"left": left["metrics"].get(k), "right": right["metrics"].get(k), "delta": right["metrics"][k] - left["metrics"][k]} for k in left.get("metrics", {}) if k in right.get("metrics", {})},
+                "note": "未返回的指标不可比较；数量差异不代表方案质量高低。"}
+
+    def show(self, session_id, run_id, visible_layers=None, zoom=True):
+        run = self.owned_run(session_id, run_id)
+        if run["status"] != "succeeded" or run["kind"] != "planning":
+            raise ValueError("只能显示成功规划的成果")
+        allowed = {"SITE", "BOITE", "PTECH", "IMB", "INFRASTRUCTURE", "CABLE", "ZPM", "ZNRO"}
+        if set(visible_layers or []) - allowed:
+            raise ValueError("未知图层类别")
+        result = run["result"]
+        display_result = {k: result[k] for k in ("geopackage", "candidate_layers") if k in result}
+        display_result["downstream"] = {"final_layers": (result.get("downstream") or {}).get("final_layers", {})}
+        command = {"id": uid("display"), "session_id": session_id, "status": "pending", "run_id": run_id,
+                   "result": display_result, "visible_layers": visible_layers or [], "zoom": zoom}
+        self.store.put("display", command)
+        return {"command_id": command["id"], "status": "pending", "message": "等待 QGIS 加载回执，尚未展示"}
+
+    def ack(self, session_id, command_id, ack):
+        command = self.store.get("display", command_id)
+        if command["session_id"] != session_id:
+            raise ValueError("显示命令不属于此会话")
+        if command["status"] != "pending":
+            return command
+        command.update(status="succeeded" if ack.success else "failed", details=ack.details)
+        self.store.put("display", command)
+        self.store.event(session_id, "display", command_id=command_id, status=command["status"], details=ack.details)
+        return command
+
+    def export(self, session_id, request, *, agent_message_id=None):
+        if agent_message_id:
+            self.authorize_agent(session_id, agent_message_id)
+        existing = self.store.dedup(session_id, "export:" + request.request_id)
+        if existing:
+            return self.owned_run(session_id, existing)
+        source = self.owned_run(session_id, request.run_id)
+        if source["status"] != "succeeded" or source.get("scope") != "full" or source["kind"] != "planning":
+            raise ValueError("仅成功的完整规划可导出完整交付包")
+        run = {"id": uid("export"), "session_id": session_id, "project_id": source["project_id"], "kind": "export", "source_run_id": source["id"], "status": "queued", "created": time.time()}
+        self.store.put("run", run)
+        self.store.dedup(session_id, "export:" + request.request_id, run["id"])
+        self.spawn(self.execute(run["id"]))
+        return run

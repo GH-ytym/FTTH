@@ -1,0 +1,16 @@
+# Normal text files may use the platform's line endings.
+* text=auto
+
+# These sources include SHA-256 manifests / package RECORD metadata.
+# Preserve their exact bytes on add and checkout, including line endings.
+vendor/ftth/** -text
+qgis_plugin/ftth_demo0/_vendor/** -text
+
+# GIS and image resources are binary.
+*.shp binary
+*.shx binary
+*.dbf binary
+*.gpkg binary
+*.png binary
+*.jpg binary
+*.ico binary

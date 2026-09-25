@@ -1,0 +1,68 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local data, conversations, checkpoints, snapshots and results
+/runtime/
+/data/
+/inputs/
+/outputs/
+/exports/
+/local/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db-journal
+*.log
+*.pid
+connection.token
+service.lock
+
+# Credentials and machine settings
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Reproducible builds
+/dist/
+/build/
+*.egg-info/
+*.whl
+*.zip
+
+# Editors, OS files and GIS temporary files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+*.bak
+*.qgs~
+*.qgz~
+*.gpkg-wal
+*.gpkg-shm
+
+# Keep uv.lock, bundled _vendor sources/licenses, algorithm manifests,
+# config templates and bundled sample GIS files under version control.

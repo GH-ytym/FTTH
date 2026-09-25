@@ -1,0 +1,11 @@
+{
+  "interface_version": "task5.fiber-link.v1",
+  "task_id": "task5_layered_task6_example",
+  "operation": "plan_hierarchical_fiber_links",
+  "input": {
+    "task6_plan": "../任务6/output/layered_planning_simulated_plan.json"
+  },
+  "output": {
+    "directory": "outputs/layered_fiber_links"
+  }
+}

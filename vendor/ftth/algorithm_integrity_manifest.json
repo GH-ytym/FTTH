@@ -1,0 +1,264 @@
+{
+  "schema_version": "ftth.algorithm-integrity.v1",
+  "scope": "Task 2-6 core algorithms and shared pipeline sources supplied in FTTH(4).zip on 2026-09-09; plugin data adapters excluded",
+  "file_count": 64,
+  "all_files_byte_identical_to_supplied_source": true,
+  "files": [
+    {
+      "path": "engine/task2/build_imb_only_dataset.py",
+      "sha256": "4ce4684abaa177354c65359891c0ddb5fcd5f845d276c41dc0e10f6a6bd5300c"
+    },
+    {
+      "path": "engine/task2/building_group_partition.py",
+      "sha256": "dba92e05ecc755bbec332c9a3544ab123a748f7f9e87433dd644260786ec35bc"
+    },
+    {
+      "path": "engine/task2/clean_imb_topology_input.py",
+      "sha256": "336d3c395f4fb8260279005e3eda6c6a2011d420714a885b467ebaab12a33476"
+    },
+    {
+      "path": "engine/task2/extract_imb_pm_model.py",
+      "sha256": "4e925b98ad79e8a319b3e2113ae6a5de0763943bd0eee26ee8f3264b40f411dc"
+    },
+    {
+      "path": "engine/task2/extract_qgis_ftth_dataset.py",
+      "sha256": "9e8d9cffb0ea68a959d7f28fd8d5f250f84e816899ffdeac2e4c231cfe2fc753"
+    },
+    {
+      "path": "engine/task2/package_task2_entrance_results.py",
+      "sha256": "7d2918d8396cc18d40245d7578bd36d66503bdefbc02a6d5411855b024a4426e"
+    },
+    {
+      "path": "engine/task2/prepare_task2_recognition_input.py",
+      "sha256": "df98a806703f546155638829e3e4096b0037bac292790f4de69d67c87bff98f0"
+    },
+    {
+      "path": "engine/task2/task2_geometry_features.py",
+      "sha256": "6b82ad8b13d9cf0df94a9a43460c3d4374b18e327947ad973f4794574897cb89"
+    },
+    {
+      "path": "engine/task2/task2_imb_entrance_features.py",
+      "sha256": "b0ee7fb3472ad88c9ae5ff6502aab330cd034d914714a8d74712cc57ba83b4ba"
+    },
+    {
+      "path": "engine/task2/task2_pipeline.py",
+      "sha256": "b0527e4909f8dcd831e77c780f11f7285eab4d727a1ce1ff7d3fd6542e5df018"
+    },
+    {
+      "path": "engine/task2/znro_zpm_partition.py",
+      "sha256": "9e50bac27b8d8e82f251c726677665774f87be0941a2b533f6303f627f59c5fb"
+    },
+    {
+      "path": "engine/task2/znro_zpm_partition_petch_atomic.py",
+      "sha256": "de2115bc33b390edd5350e2ae250c4b84ee5adf1e0e785dbffb6cb3039b715e5"
+    },
+    {
+      "path": "engine/task2/znro_zpm_region_partition.py",
+      "sha256": "5bebbde24aaa096e9088cb91a8ed6371e4bbbd3d8e68e262865771295882fa97"
+    },
+    {
+      "path": "engine/task3/ga_pm_optimizer/__init__.py",
+      "sha256": "816bf638605a34894ef7844d092fe54e01216bc1959e78be5bbc55de26c6ed65"
+    },
+    {
+      "path": "engine/task3/ga_pm_optimizer/cli.py",
+      "sha256": "8ee018838b57553ee594e879568a08a30316821b8122f94ae6575c38e2252c7d"
+    },
+    {
+      "path": "engine/task3/ga_pm_optimizer/geometry.py",
+      "sha256": "645da1ccfd2e0d478f59fa54aedff8898b806c3d2ef983aa45aa42dd3c1c0cc7"
+    },
+    {
+      "path": "engine/task3/ga_pm_optimizer/optimizer.py",
+      "sha256": "4d62a71140a15ad939111844a36ebf1d1b353e7eb416d21c81ffa0184ba20449"
+    },
+    {
+      "path": "engine/task3/ga_pm_optimizer/visualize.py",
+      "sha256": "160567615fb95e85a427be8f3b8f12f812593cb651f68ef30d6aa36ba23ea835"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/__init__.py",
+      "sha256": "dcf96b48f48a87bde43ef84e1bdc1755d1cf72b77bbef05b3de9229d9669b9c7"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/__main__.py",
+      "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/cli.py",
+      "sha256": "17d77c98bae63ea10b46e9894ef6e09e1a3fc784e1fd4674243af7b4ee5ac5d8"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/geometry.py",
+      "sha256": "722a32e5abbb1b776e4ad7fa1b7eeb8285f18250a4dc064f72708a97740cb4e5"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/graph.py",
+      "sha256": "5c1f8071cda253ff21b71120628bd5bc94ea0172b2df5d03b12f4ef741709ccb"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/io.py",
+      "sha256": "a5b81bb9d740d36b2092662d23c6e663005ac6e2c76e7c86beb71d57e8698d5e"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/models.py",
+      "sha256": "69aaab6fbfec431f5fd2bb93e5734270651b513cdaa2b3c72301e7debd389330"
+    },
+    {
+      "path": "engine/task3/nro_pm_selector/selector.py",
+      "sha256": "b169137ca0ae7aa454a0c985f56c4e4bb876753e45ca6721799699649a12b071"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/__init__.py",
+      "sha256": "766f59dc840e88fe7c31ab8ce18f7a5d590d7373c113b1b615ad3dda78c46d1e"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/environment.py",
+      "sha256": "dd3c4806a68c1e3000e423cf10ef363b7843119304528f2ee5800714b7be6de9"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/evaluate.py",
+      "sha256": "6b6d889fe785e0876ca088dddcf6befdc5a1fc3845e2b95755cd113f8770565e"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/export.py",
+      "sha256": "9e53c8288311d215954b960bcfc81741a2aaa2846068725cab823d2e318ef771"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/features.py",
+      "sha256": "015688359b2315d8d8e2ac55171d923b81dcd822b92f46d6e57c29098704b48e"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/policy.py",
+      "sha256": "5afcf7185015aade5ede866ac9edb41bee136e2aca1c9e1a088fa65f01aedd93"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/reward.py",
+      "sha256": "67c9f1f4a25b1eeb6551a0884c1ca37816194156f838879d97d12e5c6e6a2dcc"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/scenario_generator.py",
+      "sha256": "5f39a710f17b56b8a455758c714410a287b24e44e6b23fe907025473718fb649"
+    },
+    {
+      "path": "engine/task3/rl_pm_selector/train.py",
+      "sha256": "987b9a554ad16aebd7da3bf62f0e43753ee70bb4ef137b04af64a8fb31e00229"
+    },
+    {
+      "path": "engine/task3/run_stage_a.py",
+      "sha256": "8f7b375094408a329bc59766c9626be6bee1a2cd9f3947df2bcb4cae9adab7b7"
+    },
+    {
+      "path": "engine/task3/run_task3.py",
+      "sha256": "a0d3b5ef4df16b636e874ac9f9e9b93387e907c3565c9938f07eaaad4def34f6"
+    },
+    {
+      "path": "engine/task3/task3_to_task6_adapter.py",
+      "sha256": "6f7916a8674221f93100e34f89f7d80ab65bd0a32944cf5f0797b29bb4874344"
+    },
+    {
+      "path": "engine/task4/build_sample_data.py",
+      "sha256": "81ace325c2c3fb5ee8ffb8d6726104dcce34249b1d84d2431cc88bc0dc30ae24"
+    },
+    {
+      "path": "engine/task4/generate_pbo.py",
+      "sha256": "d9ae60fde5d2001619dc1e464c406c7335f8162625bf2b38a044ae278427149d"
+    },
+    {
+      "path": "engine/task4/inspect_shapefile.py",
+      "sha256": "02ed4ac7f8803872746b4f0d683fd550ddf1074370164dfc1e47cbf93d529183"
+    },
+    {
+      "path": "engine/task4/plan_pbo_bpe.py",
+      "sha256": "9c1f1bfa4f18d30e6a97fbb88013fecced4a190127a41a7891115523c14a2d09"
+    },
+    {
+      "path": "engine/task4/run_task4.py",
+      "sha256": "cc15aa58519a15235d09d685d6635bd3c4353c994827bb2f40c0b1522ff548c9"
+    },
+    {
+      "path": "engine/task5/integration_adapter.py",
+      "sha256": "d855601d3186d5e5eaf8a1d4daedfd38a4426dd854635fd4bd80883dc5e160a8"
+    },
+    {
+      "path": "engine/task5/run_task5.py",
+      "sha256": "dce31d88765a49e29ae0e75b9f6131cecd5cb69a80c3e938bad57944750b5050"
+    },
+    {
+      "path": "engine/task5/task5_core.py",
+      "sha256": "277518b0d6f75d0ca24dc2f11cfa2b8f85dc17f15300db034c21e6cd94c0bd8c"
+    },
+    {
+      "path": "engine/task5/task5_qgis.py",
+      "sha256": "12b811145547f5ca4ce4533e8b46d7079c15d95894cc64731a01fd63ede5f0b1"
+    },
+    {
+      "path": "engine/task5/visualize_task5.py",
+      "sha256": "bf4c198d757c2a38a623ad1c7b7eae5c9bae38999cd8ce6501fb8bdcc4685ad4"
+    },
+    {
+      "path": "engine/task6/code/layered_planner.py",
+      "sha256": "7769c187dc199005fb78de2c77f2ebb5c7c5b3670eba2fd0f35d2982ce57f6b6"
+    },
+    {
+      "path": "engine/task6/code/plan_task6.py",
+      "sha256": "a0c0281931bb3e57176cde175ca7d42660fea36a31ea3579668bf0f80a399b64"
+    },
+    {
+      "path": "engine/task6/code/preparation/__init__.py",
+      "sha256": "3529ff49a26c509b041765303da238b507d182aff9f0f356d4576196ea85c6ef"
+    },
+    {
+      "path": "engine/task6/code/preparation/build_task6_production_input.py",
+      "sha256": "b3ec3193cd7059a290c54865922ea68ed5c1fa09243a54d651363dda37375911"
+    },
+    {
+      "path": "engine/task6/code/preparation/clean_recognition_data.py",
+      "sha256": "5fb74476284d7743e69b41f18e71b487bc3347945542833f53c14215b4a65cc2"
+    },
+    {
+      "path": "engine/task6/code/preparation/consolidate_cleaned_roads.py",
+      "sha256": "498b80b9de23861725f8f17024e178ece0003cf3440b8c3394211dd67b0c0de9"
+    },
+    {
+      "path": "engine/task6/code/preparation/partition_buildings_by_imb.py",
+      "sha256": "ac83ab8a1dfb3ff9800eef7ceca64389e2c247b30a754f9b11d969d3fae36b79"
+    },
+    {
+      "path": "engine/task6/code/ptech_planner.py",
+      "sha256": "470de702b7d1492f2c80ac6090f5a3d6f55a6f10ddea1bc365dc9bc44f9104a5"
+    },
+    {
+      "path": "engine/task6/code/task4_assignment_adapter.py",
+      "sha256": "3ad0aefde34dfe9c42e481bbe639b5174dd1fc12dcd4b561690a959f04d15e81"
+    },
+    {
+      "path": "engine/task6/code/visualize_recognition_delivery.py",
+      "sha256": "7ebd0f8aa85b5211c304460864d62ad1ac5cec545c9adc1b167dd6c61f189588"
+    },
+    {
+      "path": "engine/task6/code/visualize_task6_plan.py",
+      "sha256": "98e533b639120fa1e0e67a3e5ccabed482fc8b7d377c040b1f1cf63de1ea4676"
+    },
+    {
+      "path": "engine/build_final_layers.py",
+      "sha256": "dbddb0de9fde88e2b02f5785b192976ea38167bd8bd39b63b4ac41c21fe38256"
+    },
+    {
+      "path": "engine/geo_constraints.py",
+      "sha256": "0567a2e1facb0221b32f4add1931d2d6d23e60249617b53131236d98fe93a4ff"
+    },
+    {
+      "path": "engine/project_paths.py",
+      "sha256": "f71bfa89227925bc69598b9af5da2fde85e780a8f03ef191481101c9ba17a84a"
+    },
+    {
+      "path": "engine/pipeline_contract.py",
+      "sha256": "55b2638f5669905611b96d81ae5cf9027f51059d7cbb3b304810a4dfea2283cd"
+    },
+    {
+      "path": "engine/run_pipeline.py",
+      "sha256": "1f2ef4debdbb0b390f6597c0c7e06d1fdf9238689e7013ec4914e95d5fdf367e"
+    }
+  ]
+}

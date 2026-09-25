@@ -1,0 +1,7 @@
+demand_id,source_id,target_id,cores_required,priority
+D001,NRO01,PM01,24,5
+D002,PM01,BPE01,12,5
+D003,BPE01,PBO01,8,4
+D004,NRO01,BPE02,24,5
+D005,BPE02,PBO02,8,4
+D006,NRO01,PBO01,12,3

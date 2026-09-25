@@ -1,0 +1,16 @@
+{
+  "package": "任务五_基于任务六管网的分层光缆连接",
+  "version": "2.0.0",
+  "entry": "run_task5.py",
+  "operation": "plan_hierarchical_fiber_links",
+  "input": "Task 6 plan JSON",
+  "outputs": [
+    "fiber_link_plan.json",
+    "fiber_links.csv",
+    "fiber_link_validation.json",
+    "fiber_links.geojson",
+    "fiber_link_overview.png"
+  ],
+  "dependencies": "Python standard library",
+  "qgis_handoff": "fiber_links.geojson"
+}

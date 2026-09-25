@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "task": "task6_layered_fixed_assignment_plan",
+    "coordinate_system": "REPLACE_WITH_REMOTE_SENSING_CRS",
+    "note": "Replace every TBD source with an inline list or a relative JSON/GeoJSON path."
+  },
+  "planning": {
+    "algorithm": "layered_fixed_assignment_shared_edge_search",
+    "candidate_paths": 5,
+    "default_edge_capacity": 2048,
+    "road_cost_per_m": 1.0,
+    "water_cost_factor": 2.0
+  },
+  "remote_sensing": {
+    "roads": {"file": "TBD/roads.geojson"},
+    "buildings": {"file": "TBD/buildings.geojson"},
+    "building_groups": {"file": "TBD/building_groups.json"},
+    "entrances": {"file": "TBD/entrances.geojson"},
+    "water_cost_zones": {"file": "TBD/water.geojson"},
+    "nro_sites": {"file": "TBD/nro_sites.json"},
+    "pm_sites": {"file": "TBD/pm_sites.json"}
+  },
+  "task2_partition": {"file": "TBD/task2_no_pipeline_partition.json"},
+  "bpe_plan": [
+    {"id": "BPE-001", "x": 0.0, "y": 0.0, "building_id": "BLDG-001", "group_id": "GROUP-001", "demand": 20}
+  ],
+  "pbo_plan": [
+    {"id": "PBO-001", "x": 0.0, "y": 0.0, "building_id": "BLDG-001", "bpe_id": "BPE-001", "demand": 20}
+  ],
+  "imb_points": [
+    {"id": "IMB-001", "x": 0.0, "y": 0.0, "ports": 20, "pm_id": "PM-001"}
+  ]
+}
