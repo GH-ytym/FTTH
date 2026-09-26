@@ -269,9 +269,12 @@ def test_serve_and_stop_lifecycle(tmp_path):
         port = sock.getsockname()[1]
     env = {k: v for k, v in os.environ.items() if not k.startswith("FTTH_") and k not in ("DASHSCOPE_API_KEY", "FTTH_API_KEY")}
     env["FTTH_QGIS_PYTHON"] = str(tmp_path / "no-qgis")  # Hermetic: skip discovery of a real QGIS.
+    # A file, not an unread PIPE: a full pipe buffer (about 4 KB on Windows) blocks
+    # the server's shutdown logging, so it never exits (seen on Windows CI).
+    console = tmp_path / "serve-console.txt"
+    output = console.open("wb")
     server = subprocess.Popen([sys.executable, "-m", "backend", "serve", "--data-dir", str(tmp_path), "--port", str(port)],
-                              cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace")
+                              cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
     try:
         import httpx
         token = None
@@ -284,13 +287,13 @@ def test_serve_and_stop_lifecycle(tmp_path):
             except (OSError, httpx.TransportError):
                 time.sleep(.2)
         else:
-            pytest.fail("backend did not start: " + server.stdout.read())
+            pytest.fail("backend did not start: " + console.read_text(encoding="utf-8", errors="replace"))
         assert health["version"] == __version__ and health["qgis"]["available"] is False
         # On Windows the venv python.exe is a launcher; the pid is the real server's.
         state = json.loads((tmp_path / "server.json").read_text(encoding="utf-8"))
         assert state["url"] == f"http://127.0.0.1:{port}" and state["pid"] > 0
         assert main(["stop", "--data-dir", str(tmp_path)]) == 0
-        assert server.wait(20) == 0
+        assert server.wait(60) == 0, console.read_text(encoding="utf-8", errors="replace")
         assert not (tmp_path / "server.json").exists()
         assert "FTTH backend stopped" in (tmp_path / "logs/backend.log").read_text(encoding="utf-8")
         assert token not in (tmp_path / "logs/backend.log").read_text(encoding="utf-8")
@@ -298,6 +301,8 @@ def test_serve_and_stop_lifecycle(tmp_path):
     finally:
         if server.poll() is None:
             server.kill()
+            server.wait()
+        output.close()
 
 
 def test_probe_never_receives_model_secrets(tmp_path, monkeypatch):
