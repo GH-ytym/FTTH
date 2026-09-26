@@ -36,7 +36,11 @@ def parse_result(output, prefix):
 
 def run_summary(run):
     result = run.get("result") or {}
-    summary = {k: result[k] for k in ("status", "phase", "errors", "warnings", "output_dir", "report", "input_summary", "region_counts") if k in result}
+    summary = {k: result[k] for k in ("status", "phase", "errors", "warnings", "output_dir", "report", "input_summary", "region_counts", "release_status", "checks", "downstream_readiness") if k in result}
+    if run.get("kind") == "planning":
+        summary["validations"] = {name: (section or {}).get("validation") for name, section in {
+            "task3": result.get("task3"), **{k: v for k, v in (result.get("downstream") or {}).items()
+                if k in {"task4", "task5", "task6", "final_layers"}}}.items() if isinstance(section, dict)}
     if run.get("kind") == "export":
         for key in ("geopackage", "shape_dir", "tables_dir", "maps_dir", "manifest", "validation_report", "validation", "task6_route_filter", "file_count"):
             if key in result:
@@ -59,6 +63,14 @@ class Service:
         self.tasks = set()
         self.processes = {}
         self.on_complete = None
+        self.reviewer = None
+        self.on_review = None
+        self.closing = False
+        self.workflows = None
+        for workflow in store.all('workflow'):
+            if workflow['status'] not in {'completed', 'cancelled', 'failed', 'interrupted', 'waiting_choice', 'blocked'}:
+                workflow.update(status='interrupted', detail='服务已重启，任务不会自动重放', options=[])
+                store.put('workflow', workflow)
         for run in store.all("run"):
             if run["status"] in ("queued", "running"):
                 run.update(status="interrupted", error="后端已重启；原任务不自动重跑")
@@ -67,6 +79,13 @@ class Service:
             if message["status"] in ("queued", "running"):
                 message.update(status="interrupted")
                 store.put("message", message)
+        for review in store.all("review"):
+            if review["status"] in ("queued", "running"):
+                review.update(status="interrupted", error="后端已重启；不恢复自动重算")
+                run = store.get("run", review["run_id"])
+                run["review"] = {k: review[k] for k in ("id", "status", "error")}
+                store.publish_objects([("review", review), ("run", run)], review["session_id"], "review",
+                    run_id=run["id"], review_id=review["id"], status="interrupted", summary=run["review"])
         for session in store.all("session"):
             if session.get("title") != "新对话" and not valid_title(session.get("title")):
                 first = next((m for m in store.all("message") if m["session_id"] == session["id"] and not m.get("notification")), None)
@@ -80,9 +99,15 @@ class Service:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+        return task
 
     async def close(self):
+        self.closing = True
         try:
+            if self.reviewer:
+                for run in self.store.all("run"):
+                    if run.get("kind") == "planning":
+                        self.reviewer.cancel(run["session_id"], run["id"])
             for task in list(self.tasks):
                 task.cancel()
             await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -94,16 +119,28 @@ class Service:
             session = self.store.get("session", session_id)
             if not session.get("project_id"):
                 raise ValueError("请先为此会话登记数据，再保存工程策略")
-            session.update(policy=policy.model_dump(), policy_confirmed_at=time.time())
+            session.update(policy=policy.model_dump(), policy_confirmed_at=time.time(), policy_version=session.get("policy_version", 0) + 1)
             return self.store.put("session", session)
 
-    def authorize_agent(self, session_id, message_id, parameters=None):
+    def authorize_agent(self, session_id, message_id, parameters=None, *, action='plan', waiting=False):
         message = self.store.get("message", message_id)
         session = self.store.get("session", session_id)
-        if message["session_id"] != session_id or message.get("notification") or not message.get("allow_actions"):
-            raise ValueError("本条消息为检查与讨论模式，不能提交规划或导出。需要执行时，请在输入框选择‘允许执行’后发送。")
+        if message["session_id"] != session_id or message.get("notification") or not message.get('workflow_id'):
+            raise ValueError("本条消息没有经过需求识别的执行授权，请明确描述要执行的操作。")
         if not message.get("project_id") or message["project_id"] != session.get("project_id"):
             raise ValueError("消息提交时未绑定此项目数据，请登记后重新发送执行请求")
+        workflow = self.store.get('workflow', message['workflow_id'])
+        auth = workflow.get('authorization', {})
+        intent = workflow.get('intent', {})
+        states = {'waiting_choice'} if waiting else {'validating', 'submitted', 'running', 'reviewing'}
+        quote = auth.get('evidence_quote', '')
+        if (workflow.get('session_id') != session_id or workflow.get('message_id') != message_id or
+            workflow.get('project_id') != message.get('project_id') or workflow['status'] not in states or
+            auth.get('source') != 'user_request' or action not in {'plan', 'export', 'display', 'cancel'} or
+            auth.get('action') != action or intent.get('action') != action or intent.get('multiple_plans') or
+            auth.get('request_content') != message.get('content') or not quote.strip() or
+            quote not in message.get('content', '') or quote != intent.get('evidence_quote')):
+            raise ValueError('本次操作缺少有效的本轮用户请求授权')
         for name in PolicyInput.model_fields:
             if parameters and parameters.get(name) and not session.get("policy", {}).get(name):
                 raise ValueError("尚未确认工程策略：" + name + "。请在数据页勾选并保存本会话策略；模型不能代替用户确认。")
@@ -188,6 +225,7 @@ class Service:
                 raise ValueError("只能继承规划任务")
             values = copy.deepcopy(base["parameters"])
             scope = request.scope or base["scope"]
+        values.update(session.get('policy', {}))
         values.update(request.parameter_overrides)
         parameters = Parameters.model_validate(values).model_dump()
         project = self.store.get("project", session["project_id"])
@@ -230,14 +268,107 @@ class Service:
         checked = self.validate(session_id, request)
         if not checked["valid"]:
             raise ValueError("；".join(checked["errors"]))
-        project, scope, p = self.resolve(session_id, request)
-        run = {"id": uid("run"), "session_id": session_id, "project_id": project["id"], "kind": "planning",
-               "status": "queued", "scope": scope, "parameters": p, "base_run_id": request.base_run_id, "created": time.time()}
-        self.store.put("run", run)
-        self.store.dedup(session_id, "run:" + request.request_id, run["id"])
-        self.store.event(session_id, "run", run_id=run["id"], status="queued")
-        self.spawn(self.execute(run["id"]))
+        with self.store.lock:
+            # Recheck within the same lock used by automatic repair creation.
+            existing = self.store.dedup(session_id, "run:" + request.request_id)
+            if existing:
+                return self.owned_run(session_id, existing)
+            project, scope, p = self.resolve(session_id, request)
+            if agent_message_id:
+                self.authorize_agent(session_id, agent_message_id, p)
+            session = self.store.get("session", session_id)
+            if not agent_message_id:
+                # A manual run is itself the explicit policy selection.
+                self.set_policy(session_id, PolicyInput(**{k: p[k] for k in PolicyInput.model_fields}))
+                session = self.store.get("session", session_id)
+            message = self.store.get("message", agent_message_id) if agent_message_id else {}
+            allowed = bool(message.get("allow_auto_repair")) if agent_message_id else request.allow_auto_repair
+            run = {"id": uid("run"), "session_id": session_id, "project_id": project["id"], "kind": "planning",
+                   "status": "queued", "scope": scope, "parameters": p, "base_run_id": request.base_run_id, "created": time.time(),
+                   "allow_auto_repair": allowed, "repair_count": 0,
+                   "authorization": {"source": "message" if agent_message_id else "manual", "message_id": agent_message_id,
+                       "policy_version": session.get("policy_version", 0), "project_id": project["id"], "input_hashes": project.get("hashes", {})}}
+            run["repair_root_id"] = run["id"]
+            session["latest_planning_id"] = run["id"]
+            objects = [('session', session)]
+            if agent_message_id:
+                message['submitted_run_id'] = run['id']
+                objects.append(('message', message))
+            if message.get('workflow_id'):
+                workflow = self.store.get('workflow', message['workflow_id'])
+                run['workflow_id'] = workflow['id']
+                workflow.update(status='submitted', run_id=run['id'], detail='规划已提交，等待后台计算。', options=[])
+                objects.append(('workflow', workflow))
+            digest = hashlib.sha256(json.dumps({'scope': scope, 'parameters': p, 'base': request.base_run_id}, sort_keys=True).encode()).hexdigest()
+            run, created = self.store.commit_action(session_id, message.get('workflow_id') or agent_message_id or request.request_id,
+                'planning', digest, run, objects, 'run:' + request.request_id)
+        if created:
+            self.spawn(self.execute(run["id"]))
         return run
+
+    def repair_authorized(self, root):
+        session = self.store.get("session", root["session_id"])
+        auth = root.get("authorization", {})
+        if root.get('workflow_id') and session.get('latest_workflow_id') != root['workflow_id']:
+            raise ValueError('已有后续规划请求，禁止旧任务自动重算')
+        if (not root.get("allow_auto_repair") or root.get("workflow_cancelled") or
+            session.get("latest_planning_id") != root["id"] or
+            session.get("policy_version", 0) != auth.get("policy_version") or
+            session.get("project_id") != auth.get("project_id")):
+            raise ValueError("自动重算未授权、已取消、策略改变或已被后续规划取代")
+        if auth.get("source") == "message":
+            self.authorize_agent(root["session_id"], auth["message_id"], root["parameters"])
+            if not self.store.get("message", auth["message_id"]).get("allow_auto_repair"):
+                raise ValueError("原消息的自动重算授权已撤销")
+        project = self.store.get("project", root["project_id"])
+        if not auth.get("input_hashes") or auth["input_hashes"] != project.get("hashes"):
+            raise ValueError("输入快照身份不匹配")
+        self.verify_snapshot(project)
+
+    def submit_repair(self, run_id, review_id, patch):
+        from .review import LIMITS, Evidence, ReviewResult
+        with self.store.lock:
+            root = self.store.get("run", run_id)
+            if root.get("repair_parent_id") or root.get("repair_count", 0) or root.get("scope") != "full":
+                raise ValueError("一次自动重算额度已使用或任务不适用")
+            self.repair_authorized(root)
+            review = self.store.get("review", review_id)
+            if review["run_id"] != run_id or not review.get("automatic") or review["status"] != "completed":
+                raise ValueError("审查不能授权此运行的修复")
+            evidence = Evidence(self, root)
+            evidence.verify()
+            if evidence.digest != review.get("evidence", {}).get("digest"):
+                raise ValueError("审查证据版本不匹配")
+            accepted_patch = evidence.repair_patch(ReviewResult.model_validate(review["result"]))
+            if patch != accepted_patch:
+                raise ValueError("修复补丁与已验证审查不一致")
+            if not patch:
+                raise ValueError("空参数补丁")
+            for name, value in patch.items():
+                old = root["parameters"].get(name)
+                valid = (name == "ga_refine" and old is False and value is True) or (
+                    name in LIMITS and type(value) is int and old < value <= min(2 * old, LIMITS[name]))
+                if not valid:
+                    raise ValueError("自动重算参数越界：" + name)
+            request = RunInput(request_id="repair:" + run_id, base_run_id=run_id, parameter_overrides=patch)
+            checked = self.validate(root["session_id"], request)
+            if not checked["valid"]:
+                raise ValueError("修复参数未通过输入校验")
+            child = {"id": uid("run"), "session_id": root["session_id"], "project_id": root["project_id"],
+                "kind": "planning", "status": "queued", "scope": "full", "parameters": checked["parameters"],
+                "base_run_id": run_id, "repair_parent_id": run_id, "repair_root_id": run_id,
+                "repair_review_id": review_id, "repair_parameter_patch": patch,
+                "repair_count": 1, "allow_auto_repair": False, "authorization": root["authorization"], "created": time.time()}
+            root.update(repair_count=1, repair_child_id=child["id"])
+            if root.get('workflow_id'):
+                child['workflow_id'] = root['workflow_id']
+            self.store.publish_objects([("run", root), ("run", child)], root["session_id"], "run", run_id=child["id"], status="queued")
+        self.spawn(self.execute(child["id"]))
+        return child
+
+    def review_finished(self, review):
+        if self.on_review and not self.closing:
+            self.on_review(review)
 
     async def kill(self, proc):
         if proc.returncode is not None:
@@ -310,11 +441,31 @@ class Service:
             run = self.store.get("run", run_id)
             if run["status"] != "queued":
                 return
+            if run.get('workflow_id') and not run.get('repair_parent_id'):
+                session = self.store.get('session', run['session_id'])
+                workflow = self.store.get('workflow', run['workflow_id'])
+                if workflow['status'] in {'cancelled', 'interrupted'} or session.get('policy_version', 0) != run['authorization']['policy_version']:
+                    run.update(status='cancelled', error='工作流已取消或策略版本已变化')
+                    self.store.put('run', run)
+                    if self.workflows:
+                        self.workflows.publish(workflow, status='cancelled', detail=run['error'], options=[])
+                    return
+            if run.get("repair_parent_id"):
+                try:
+                    self.repair_authorized(self.store.get("run", run["repair_parent_id"]))
+                except ValueError as exc:
+                    run.update(status="cancelled", error=str(exc))
+                    self.store.publish_objects([("run", run)], run["session_id"], "run", run_id=run_id, status="cancelled")
+                    if self.reviewer:
+                        self.reviewer.enqueue(run["session_id"], run_id, "automatic:" + run_id, automatic=True)
+                    return
             directory = self.settings.data / "runs" / run_id
             directory.mkdir(parents=True)
             run.update(status="running", directory=str(directory), started=time.time())
             self.store.put("run", run)
             self.store.event(run["session_id"], "run", run_id=run_id, status="running")
+            if self.workflows:
+                self.workflows.run_changed(run)
             try:
                 if run["kind"] == "export":
                     source = self.owned_run(run["session_id"], run["source_run_id"])
@@ -358,9 +509,15 @@ class Service:
                 if self.store.get("run", run_id)["status"] == "cancelled":
                     run["status"] = "cancelled"
                 run["finished"] = time.time()
+                # Cancellation may have updated workflow authority while awaiting the worker.
+                saved = self.store.get("run", run_id)
+                if saved.get("workflow_cancelled"):
+                    run["workflow_cancelled"] = True
                 self.store.put("run", run)
                 write_json(directory / "run.json", run)
                 self.store.event(run["session_id"], "run", run_id=run_id, status=run["status"], elapsed_seconds=round(run["finished"] - run["started"], 1))
+            if self.reviewer and run["kind"] == "planning":
+                self.reviewer.enqueue(run["session_id"], run_id, "automatic:" + run_id, automatic=True)
             if self.on_complete:
                 if run["kind"] == "planning" and run["status"] == "succeeded":
                     self.show(run["session_id"], run["id"])
@@ -384,13 +541,27 @@ class Service:
 
     async def cancel(self, session_id, run_id):
         run = self.owned_run(session_id, run_id)
-        if run["status"] in ("queued", "running"):
-            run["status"] = "cancelled"
-            self.store.put("run", run)
-            if run_id in self.processes:
-                await self.kill(self.processes[run_id])
-            self.store.event(session_id, "run", run_id=run_id, status="cancelled")
-        return run
+        root_id = run.get("repair_root_id", run_id)
+        with self.store.lock:
+            root = self.owned_run(session_id, root_id)
+            root["workflow_cancelled"] = True
+            if root.get('workflow_id') and self.workflows:
+                workflow = self.store.get('workflow', root['workflow_id'])
+                self.workflows.publish(workflow, status='cancelled', detail='工作流已取消', options=[])
+            self.store.put("run", root)
+            targets = [r for r in self.store.all("run") if r["id"] == root_id or r.get("repair_root_id") == root_id]
+            for target in targets:
+                target["workflow_cancelled"] = True
+                if target["status"] in ("queued", "running"):
+                    target["status"] = "cancelled"
+                self.store.publish_objects([("run", target)], session_id, "run", run_id=target["id"], status=target["status"])
+        for target in targets:
+            if target["id"] in self.processes:
+                await self.kill(self.processes[target["id"]])
+            if self.reviewer:
+                if target.get("kind") == "planning":
+                    self.reviewer.cancel(session_id, target["id"])
+        return self.owned_run(session_id, run_id)
 
     def compare(self, session_id, a, b):
         left, right = self.owned_run(session_id, a), self.owned_run(session_id, b)
@@ -430,7 +601,7 @@ class Service:
 
     def export(self, session_id, request, *, agent_message_id=None):
         if agent_message_id:
-            self.authorize_agent(session_id, agent_message_id)
+            self.authorize_agent(session_id, agent_message_id, action='export')
         existing = self.store.dedup(session_id, "export:" + request.request_id)
         if existing:
             return self.owned_run(session_id, existing)
@@ -438,7 +609,16 @@ class Service:
         if source["status"] != "succeeded" or source.get("scope") != "full" or source["kind"] != "planning":
             raise ValueError("仅成功的完整规划可导出完整交付包")
         run = {"id": uid("export"), "session_id": session_id, "project_id": source["project_id"], "kind": "export", "source_run_id": source["id"], "status": "queued", "created": time.time()}
-        self.store.put("run", run)
-        self.store.dedup(session_id, "export:" + request.request_id, run["id"])
-        self.spawn(self.execute(run["id"]))
+        message = self.store.get('message', agent_message_id) if agent_message_id else {}
+        objects = []
+        if message.get('workflow_id'):
+            w = self.store.get('workflow', message['workflow_id'])
+            run['workflow_id'] = w['id']
+            run['authorization'] = {'policy_version': self.store.get('session', session_id).get('policy_version', 0)}
+            w.update(status='submitted', run_id=run['id'], detail='导出任务已提交', options=[])
+            objects.append(('workflow', w))
+        run, created = self.store.commit_action(session_id, message.get('workflow_id') or agent_message_id or request.request_id,
+            'export', request.run_id, run, objects, 'export:' + request.request_id)
+        if created:
+            self.spawn(self.execute(run["id"]))
         return run

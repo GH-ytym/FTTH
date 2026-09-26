@@ -30,7 +30,7 @@ p.url.setText(os.environ["DEMO_TEST_URL"])
 p.token.setText(os.environ["DEMO_TEST_TOKEN"])
 p.resize(480, 780)
 p.show()
-out = ROOT / "runtime/release-0.4.0"
+out = ROOT / "runtime/release-0.5.0"
 out.mkdir(parents=True, exist_ok=True)
 
 def wait_for(predicate, timeout=20):
@@ -44,11 +44,11 @@ def wait_for(predicate, timeout=20):
     raise AssertionError("UI condition timed out")
 
 p.message.setText("请检查规划数据，先给我建议。")
-p.action_mode.setCurrentIndex(1)
+assert not hasattr(p, "action_mode")
 p.send()
 wait_for(lambda: p.session and p.transcript.replies)
 sid = p.session
-assert p.action_mode.currentData() is True  # First-message creation keeps explicit mode.
+assert not hasattr(p, "action_mode")  # First message needs no execution switch.
 mid = next(iter(p.transcript.replies))
 card = p.transcript.replies[mid]
 wait_for(lambda: card.current_text and card.status == "running")
@@ -103,4 +103,4 @@ app.processEvents()
 print("Deleted panel widgets", flush=True)
 app.exitQgis()
 assert not uncaught, uncaught
-print("PASS: actual SSE text growth, animated status, first-message execution mode, live history recovery, one final card, copy, 480px layout, original-session registration")
+print("PASS: actual SSE text growth, animated status, first-message natural-language request, live history recovery, one final card, copy, 480px layout, original-session registration")

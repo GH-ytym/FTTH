@@ -7,14 +7,16 @@ from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .agent import AgentController
-from .models import AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput
+from .models import AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput, ReviewInput
+from .review import ReviewController
 from .service import Service, run_summary
 from .settings import Settings
 from .store import Store
 from .titles import fallback_title
+from .models import WorkflowChoice
 
 
-def create_app(settings=None, model=None):
+def create_app(settings=None, model=None, review_model=None):
     settings = settings or Settings()
     store = Store(settings.data / "app.sqlite")
 
@@ -26,6 +28,8 @@ def create_app(settings=None, model=None):
             async with AsyncSqliteSaver.from_conn_string(str(settings.data / "checkpoints.sqlite")) as saver:
                 agent = AgentController(service, saver, model)
                 service.on_complete = agent.completed
+                service.reviewer = ReviewController(service, review_model)
+                service.on_review = agent.review_completed
                 app.state.service, app.state.agent = service, agent
                 try:
                     yield
@@ -48,7 +52,7 @@ def create_app(settings=None, model=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.4.0", "model_configured": settings.model_ready, "model": settings.model,
+        return {"status": "ok", "version": "0.6.0", "execution_authority": "user_request", "model_configured": settings.model_ready, "model": settings.model,
                 "model_api": settings.model_api, "provider": settings.provider,
                 "qgis_python_exists": (settings.qgis / "bin/python.exe").exists()}
 
@@ -79,7 +83,7 @@ def create_app(settings=None, model=None):
     def history(sid: str):
         with store.lock:
             session = store.get("session", sid)
-            messages = [{k: m[k] for k in ("id", "content", "response", "partial_response", "stream_id", "status", "notification", "elapsed_seconds") if k in m}
+            messages = [{k: m[k] for k in ("id", "content", "response", "partial_response", "stream_id", "status", "notification", "elapsed_seconds", "workflow_id", "action_status") if k in m}
                 for m in sorted(store.all("message"), key=lambda m: m.get("created", 0)) if m["session_id"] == sid]
             for message in messages:
                 if message.get("notification"):
@@ -87,7 +91,21 @@ def create_app(settings=None, model=None):
             cursor = store.db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE session=?", (sid,)).fetchone()[0]
             activity = [dict(id=row[0], **json.loads(row[1])) for row in store.db.execute("SELECT id,data FROM events WHERE session=? AND id<=? ORDER BY id", (sid, cursor))]
             return {"session": session, "messages": messages, "cursor": cursor,
-                "activities": [e for e in activity if e["type"] in ("activity", "progress", "run", "algorithm")]}
+                "timeline": [e for e in activity if e['type'] not in {'assistant_stream', 'progress'}],
+                "workflows": [w for w in store.all('workflow') if w['session_id'] == sid],
+                "activities": [e for e in activity if e["type"] in ("activity", "progress", "run", "algorithm", "review")]}
+
+    @app.get('/sessions/{sid}/workflows/{wid}')
+    def workflow(sid: str, wid: str):
+        return app.state.agent.workflows.owned(sid, wid)
+
+    @app.post('/sessions/{sid}/workflows/{wid}/resolve')
+    async def resolve_workflow(sid: str, wid: str, choice: WorkflowChoice):
+        return app.state.agent.workflows.resolve(sid, wid, choice)
+
+    @app.post('/sessions/{sid}/workflows/{wid}/cancel')
+    async def cancel_workflow(sid: str, wid: str):
+        return await app.state.agent.workflows.cancel(sid, wid)
 
     @app.post("/sessions/{sid}/policy")
     def policy(sid: str, spec: PolicyInput):
@@ -114,8 +132,15 @@ def create_app(settings=None, model=None):
     async def run(sid: str, spec: RunInput):
         service = app.state.service
         result = service.submit(sid, spec)
-        service.set_policy(sid, PolicyInput(**{k: result["parameters"][k] for k in PolicyInput.model_fields}))
         return result
+
+    @app.get("/sessions/{sid}/runs/{rid}/reviews")
+    def reviews(sid: str, rid: str):
+        return app.state.service.reviewer.list(sid, rid)
+
+    @app.post("/sessions/{sid}/runs/{rid}/reviews", status_code=202)
+    async def review(sid: str, rid: str, spec: ReviewInput):
+        return app.state.service.reviewer.enqueue(sid, rid, "manual:" + spec.request_id)
 
     @app.get("/sessions/{sid}/runs")
     def runs(sid: str):

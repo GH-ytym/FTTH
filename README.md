@@ -1,14 +1,14 @@
 # FTTH Agent for QGIS
 
-基于 **QGIS 桌面插件 + 单 Agent + 独立算法进程** 的 FTTH 光纤接入网规划工作空间。通过中文对话检查数据、提交规划、调整参数、比较方案，在 QGIS 中展示和导出成果。
+基于 **QGIS 桌面插件 + 主 Agent + 独立审查 Agent + 独立算法进程** 的 FTTH 光纤接入网规划工作空间。通过中文对话检查数据、提交规划、调整参数、比较方案，在 QGIS 中展示和导出成果。
 
-当前插件版本 **0.4.0**。面向同机、单用户 Windows 环境，仍处于实验阶段。
+当前插件版本 **0.6.0**。面向同机、单用户 Windows 环境，仍处于实验阶段。
 
 ## 功能
 
 - **对话规划**：LangChain 工具调用与 LangGraph 会话记忆，支持 Qwen 和支持 tool calling 的 OpenAI 兼容接口。
 - **实时回复**：正文流式显示、动态状态与耗时、Markdown 和复制，切换会话后恢复已收到的正文。
-- **执行权限**：“检查与讨论”和“允许执行”分离；道路来源与拆分策略由用户保存，模型不能自行批准。
+- **自然语言执行**：明确要求规划或导出即可执行，无需切换模式；LLM 识别本轮意图，后端验证动作授权、数据及工程策略。
 - **可追溯运行**：输入快照与 SHA-256 校验、参数继承、取消、报告和方案比较。
 - **地图与交付**：成果按批次显示，收到 QGIS 回执后确认展示；完整规划可导出 GPKG、SHP、表格和规划图。
 - **运行保护**：数据目录单实例锁、独立子进程、超时与取消处理；会话标题过滤拒答和无效输出。
@@ -20,7 +20,9 @@ QGIS 插件（Qt5 / Fluent UI）
          │ 本机 HTTP + Bearer Token
          ▼
 FastAPI 后端（Python 3.12）
-  ├─ 单 Agent：检查、校验、规划、比较、展示、导出
+  ├─ 主 Agent：识别需求、只读问答
+  ├─ 固定工作流：校验、规划、比较、展示、导出
+  ├─ 独立审查 Agent：只读审查与受限修复建议
   ├─ SQLite：会话、事件、任务、模型上下文
   └─ 单任务队列 → QGIS Python 独立进程 → FTTH 算法
 ```
@@ -127,7 +129,7 @@ uv sync --frozen
 2. 也可“导入配置 JSON”使用已有字段映射。源文件必须在本机存在；相对路径按 JSON 所在目录解析。
 3. 登记输入快照并绑定会话。“当前图层”按钮有选中要素时保存所选部分，否则保存整层。
 4. 勾选道路来源及拆分策略，点击 **保存本会话工程策略**。
-5. 输入框切换 **允许执行** 后发送规划请求；只讨论时保持“检查与讨论”。
+5. 直接发送“开始完整规划”或“导出上次结果”；讨论、假设和否定请求进入问答，无需切换模式。
 
 完整规划：
 
@@ -154,6 +156,40 @@ uv sync --frozen
 
 ## 配置与数据保存
 
+### 0.6.0 固定执行流程
+
+主模型先输出严格的需求结构；规划、导出和展示由程序工作流执行，普通问答只获得只读工具。工作流单独记录“识别、校验、等待选择、提交、计算、审查、结束”，聊天回复生成完成不再代表规划完成。
+
+新规划继承已保存工程策略；继承旧运行时保留数值参数，但策略以当前保存版本为准。数据冲突在聊天中显示选择卡片，例如启用识别道路却未登记道路时，可选择“仅用现有正式设施继续”；只有用户选择后才保存该变更。选择卡片可恢复，过期、撤销授权、取消或被后续请求取代的卡片不能执行。
+
+每条规划请求只能创建一个根运行。参数变化不能绕过数据库唯一动作记录；运行、幂等键及提交事件同事务写入。自动重算仍最多一次，补审不获得新的修复额度。
+
+完整历史保留在数据库，模型默认只看近期上下文和精简运行摘要，报告按登记 ID 分页读取。审查通知区分错误、警告与说明；实际修复资格由后端判定。
+
+新增 `GET /sessions/{sid}/workflows/{wid}`、`POST .../resolve`（`request_id`、`option_id`、`version`）及 `POST .../cancel`。历史接口含工作流快照，事件接口含 `workflow` 事件。旧客户端仍可调用原接口；`allow_actions` 仅兼容接收并忽略，不能授予或否决执行权限，建议同步更新插件。授权来自本轮意图及用户原文，绑定会话、项目和动作；后台通知不能授权。自动重算省略时关闭。第一次升级数据库前会生成 `*.pre-0.6.0-*.bak`；历史任务不会自动恢复或重跑。
+
+验证固定工作流、真实 QGIS 算法和导出（默认假模型）：
+
+```powershell
+.venv\Scripts\python.exe -X utf8 scripts/verify_reviews.py --workflow
+```
+
+在已配置 Qwen 环境变量的终端增加 `--real-model`，额外验证真实模型对否定、引用、假设、取消和实际规划请求的识别。真实模型验证未完成前，不应把假模型测试当作模型理解能力验收。详见 [0.6.0 验收记录](RELEASE-0.6.0.md)。
+
+### 独立审查与一次重算
+
+每次规划结束后，后台自动收集当前批次的校验报告，由独立上下文的审查 Agent 给出结论、问题对象、证据编号和修复建议。计算状态、程序校验和 AI 审查分别显示；AI 审查不替代工程验收，也不改变原有导出门槛。
+
+设置页的“对话运行偏好”提供“搜索失败时自动重算一次”（默认勾选）；手动运行有独立开关。两项偏好分别记忆，每次发送或运行时保存本次选择。关闭后仍进行独立审查，只是不自动重算；旧客户端省略 `allow_auto_repair` 时关闭。
+
+自动重算只在完整规划具有齐全结构化证据、问题属于候选路径或组合搜索失败时执行。只允许增加 `candidate_paths`、`ga_population`、`ga_generations`（至多两倍并受现有上限约束），或开启 `ga_refine`。不修改需求、容量、距离、工程策略、输入文件、坐标或拓扑。新建一次子运行后再审查，不再自动重跑。授权变化、后续规划、取消或输入改变都会阻止尚未开始的修复。
+
+“运行 → 审查报告”显示结论与证据；“补充审查”只复核、不重新获得修复额度；“取消工作流”同时停止该根任务的待执行修复和审查，并可终止正在运行的修复子任务。历史成果保持原样，不批量补审。证据快照位于 `runtime/reviews/<review_id>/evidence.json`，审查状态、结论和修复关联持久化在 SQLite。
+
+部分冻结算法会在写出结构化诊断前抛异常；这些任务明确显示证据缺失，不从错误字符串推断修复操作。模型未配置、超时或输出无效时保留算法结果和程序校验，不启动自动重算。AI 审查属于应用层工具与上下文隔离，不是操作系统沙箱。
+
+接口新增 `GET/POST /sessions/{sid}/runs/{rid}/reviews`；POST 接收 `request_id` 并保证同请求幂等。消息与手动规划请求新增布尔字段 `allow_auto_repair`，默认 `false`。主 Agent 只能通过 `get_reviews` 读取审查，审查 Agent 只可按证据 ID 读取本次登记的报告。
+
 | 环境变量 | 用途 / 默认值 |
 |---|---|
 | `FTTH_QGIS_ROOT` | QGIS 根目录，默认 `D:/osgeo` |
@@ -165,6 +201,13 @@ uv sync --frozen
 | `FTTH_MODEL_API` | `chat`（默认）或 `responses` |
 | `FTTH_ENABLE_THINKING` | `true` / `false`，默认 `true` |
 | `FTTH_RUN_TIMEOUT` | 算法超时秒数，默认 `3600` |
+| `FTTH_REVIEW_MODEL` | 独立审查模型；默认沿用主模型 |
+| `FTTH_REVIEW_PROVIDER` | 独立审查提供商；默认沿用主配置 |
+| `FTTH_REVIEW_BASE_URL` | 独立审查接口；默认沿用主配置 |
+| `FTTH_REVIEW_API_KEY` | 审查凭据；修改接口地址时必须显式设置，不跨地址继承主密钥 |
+| `FTTH_REVIEW_MODEL_API` | `chat` 或 `responses`；默认沿用主配置 |
+
+审查关闭扩展思考，限制为 180 秒、6 次批量证据查询、总计 4,096 生成 token 和最多一次结构纠正。提供商未返回 token 用量时采用保守 UTF-8 字节计费限制。证据读取上限为每文件 8 MiB、每项模型可见内容 24,000 字符；截断或必需报告缺失不能判为通过，也不启动修复。
 
 `start_qwen.ps1` 指定 Qwen 端点与模型；自定义模型/端点应设置环境变量后运行 `start.ps1`。脚本不会自动加载 `.env` 文件。
 
@@ -184,9 +227,17 @@ uv sync --frozen
 # 临时后端 + 实际 Qt 控件验收
 .\.venv\Scripts\python.exe scripts/verify_conversations.py
 .\.venv\Scripts\python.exe scripts/verify_streaming_ui.py
+.\.venv\Scripts\python.exe -X utf8 scripts/verify_review_ui.py
 
 # 验证已安装的插件
 .\.venv\Scripts\python.exe scripts/verify_streaming_ui.py --installed
+.\.venv\Scripts\python.exe -X utf8 scripts/verify_review_ui.py --installed
+
+# 真实本地 51IMB 数据和算法 + 脚本化审查模型；使用独立数据目录
+.\.venv\Scripts\python.exe -X utf8 scripts/verify_reviews.py --config runtime/51imb-config.json
+
+# 显式使用当前终端配置的真实审查模型；没有配置会直接退出
+.\.venv\Scripts\python.exe -X utf8 scripts/verify_reviews.py --real-model
 ```
 
 部分子进程回归需要本机 QGIS，UI 验收也需要 QGIS 环境。`scripts/smoke_51imb.py` 依赖仓库同级 `FTTH(4)/FTTH/Input/51IMB/Task1/final_data`，不是克隆即用的测试；运行前先停止同数据目录后端。`qgis_ui_smoke.py` 依赖已有 smoke 成果。
@@ -206,7 +257,7 @@ runtime/                    本机数据与成果（Git 忽略）
 dist/                       本机构建的插件包（Git 忽略）
 ```
 
-开发记录：[更新说明](RELEASE-0.4.0.md)、[验证记录](VALIDATION.md)、[审核报告](audit/REVIEW.md)。这些文档包含历史开发环境记录，以当前代码及重新运行的测试为准。
+开发记录：[更新说明](RELEASE-0.6.0.md)、[验证记录](VALIDATION.md)、[审核报告](audit/REVIEW.md)。这些文档包含历史开发环境记录，以当前代码及重新运行的测试为准。
 
 ## 停止、升级与常见问题
 

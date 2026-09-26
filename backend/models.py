@@ -37,6 +37,7 @@ class SessionInput(StrictModel):
 
 class RunInput(StrictModel):
     request_id: str = Field(min_length=1)
+    allow_auto_repair: bool = False
     base_run_id: str | None = None
     scope: Literal["partition", "full"] | None = None
     parameter_overrides: dict = Field(default_factory=dict)
@@ -45,7 +46,20 @@ class RunInput(StrictModel):
 class MessageInput(StrictModel):
     request_id: str = Field(min_length=1)
     content: str = Field(min_length=1, max_length=20000)
-    allow_actions: bool = False
+    # Accepted for older clients only; execution authority comes from the
+    # current request's interpreted workflow, never from this client flag.
+    allow_actions: bool | None = Field(default=None, deprecated=True)
+    allow_auto_repair: bool = False
+
+
+class ReviewInput(StrictModel):
+    request_id: str = Field(min_length=1, max_length=200)
+
+
+class WorkflowChoice(StrictModel):
+    request_id: str = Field(min_length=1, max_length=200)
+    option_id: str = Field(min_length=1, max_length=100)
+    version: int = Field(ge=1)
 
 
 class PolicyInput(StrictModel):

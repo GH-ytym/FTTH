@@ -137,13 +137,14 @@ wheels = [
 
 [[package]]
 name = "ftth-demo0"
-version = "0.4.0"
+version = "0.6.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-openai" },
+    { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic" },
     { name = "pytest" },
@@ -156,6 +157,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "langchain", specifier = ">=1,<2" },
     { name = "langchain-openai", specifier = ">=1,<2" },
+    { name = "langgraph", specifier = ">=1.2.12,<2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pytest", specifier = ">=8,<10" },

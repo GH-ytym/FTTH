@@ -45,6 +45,6 @@ class Settings:
                    QT_PLUGIN_PATH=f"{prefix}/qtplugins;{root}/apps/Qt5/plugins")
         env["PATH"] = ";".join(map(str, [root / "bin", prefix / "bin", root / "apps/Qt5/bin"])) + ";" + env.get("PATH", "")
         # Model credentials have no purpose in the algorithm process.
-        for key in ("FTTH_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        for key in ("FTTH_API_KEY", "FTTH_REVIEW_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
             env.pop(key, None)
         return env

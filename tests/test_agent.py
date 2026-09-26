@@ -1,10 +1,12 @@
 import asyncio
+import json
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from backend.agent import AgentController
 from backend.models import PolicyInput
+from conftest import authorize_message
 from test_service import setup_service
 
 
@@ -17,6 +19,8 @@ class FakeToolModel(BaseChatModel):
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if '需求理解阶段' in messages[0].content:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'name': 'Intent', 'args': {'action': 'query'}, 'id': 'intent'}]))])
         if isinstance(messages[-1], ToolMessage):
             response = AIMessage(content="已读取项目，有3个需求点。")
         else:
@@ -43,6 +47,9 @@ def test_real_agent_loop_and_sqlite_memory(tmp_path):
 
 class FakeSubmitModel(FakeToolModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if '需求理解阶段' in messages[0].content:
+            request = json.loads(messages[1].content)['current_request']
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'name': 'Intent', 'args': {'action': 'plan', 'scope': 'full', 'evidence_quote': request}, 'id': 'intent'}]))])
         if isinstance(messages[-1], ToolMessage):
             response = AIMessage(content="任务已提交")
         else:
@@ -68,14 +75,23 @@ def test_agent_submission_and_export_schedule_real_async_tasks(tmp_path):
         async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "memory.sqlite")) as saver:
             controller = AgentController(service, saver, FakeSubmitModel())
             await controller.respond({"id": "submit-message", "session_id": sid,
-                "status": "queued", "content": "使用正式基础设施执行完整规划", "allow_actions": True, "project_id": "p"})
+                "status": "queued", "content": "使用正式基础设施执行完整规划", "project_id": "p"})
             await asyncio.sleep(0)
-            assert service.store.get("message", "submit-message")["status"] == "succeeded"
+            submitted = service.store.get("message", "submit-message")
+            assert submitted["status"] == "succeeded"
+            assert '规划已提交' in submitted['response']
+            assert submitted['submitted_run_id'] in executed
             assert len(executed) == 1
             first = executed[0]
             assert service.store.get("run", first)["status"] == "succeeded"
+            await controller.publish_completion({"id": "completion_test", "session_id": sid}, service.store.get("run", first))
+            notice = service.store.get("message", "completion_test")["response"]
+            assert "规划计算已完成" in notice and first not in notice and len(notice) < 150
+            await controller.publish_review({"id": "review_test", "run_id": first, "session_id": sid, "status": "failed", "error": "ValueError"})
+            notice = service.store.get("message", "review_report_review_test")["response"]
+            assert "补充审查" in notice and "ValueError" not in notice and first not in notice
             export = controller.tools(sid, "export-message")[-1]
-            service.store.put("message", {"id": "export-message", "session_id": sid, "allow_actions": True, "project_id": "p"})
+            authorize_message(service, sid, "export-message", action="export")
             result = await export.ainvoke({"run_id": first})
             await asyncio.sleep(0)
             assert executed == [first, result["id"]]
@@ -103,6 +119,9 @@ def test_export_notification_refreshes_source_display_receipts(tmp_path):
 
 class CompletionThenRerunModel(FakeToolModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if '需求理解阶段' in messages[0].content:
+            request = json.loads(messages[1].content)['current_request']
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'name':'Intent', 'id':'intent', 'args':{'action':'plan', 'base_run_id':'seed', 'parameter_overrides':{'zpm_max_cap':600}, 'evidence_quote':request}}]))])
         if isinstance(messages[-1], ToolMessage):
             response = AIMessage(content="已完成当前请求")
         elif "当前轮次是后台完成事件" in messages[0].content:
@@ -130,7 +149,7 @@ def test_completion_event_does_not_override_next_user_rerun(tmp_path):
                 "run_id":"seed", "content":"后台任务完成通知"})
             state = await saver.aget({"configurable":{"thread_id":sid}})
             assert all(m.type != "human" for m in state["channel_values"]["messages"])
-            await agent.respond({"id":"change600", "session_id":sid, "content":"沿用刚才方案，只把容量改为600并重跑", "allow_actions":True, "project_id":"p"})
+            await agent.respond({"id":"change600", "session_id":sid, "content":"沿用刚才方案，只把容量改为600并重跑", "project_id":"p"})
             assert service.store.get("message", "change600")["status"] == "succeeded"
             new = [r for r in service.store.all("run") if r["id"] != "seed"]
             assert len(new) == 1 and new[0]["base_run_id"] == "seed"

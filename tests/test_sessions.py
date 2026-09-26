@@ -24,7 +24,7 @@ def test_first_message_history_title_and_late_project_binding(tmp_path):
         assert history["messages"][0]["content"] == payload["content"]
         assert history["messages"][0]["response"]
         assert history["messages"][0]["elapsed_seconds"] >= 0
-        assert history["activities"][0]["name"] == "inspect_project"
+        assert any(e.get('name') == 'inspect_project' for e in history['activities'])
         assert client.get("/sessions").json()[0]["title"] == payload["content"]
         events = client.get(f"/sessions/{sid}/events").json()
         assert len([e for e in events if e["type"] == "user"]) == 1

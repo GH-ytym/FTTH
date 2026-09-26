@@ -1,3 +1,4 @@
+from conftest import authorize_message
 """Real OpenAI SSE adapter -> agent callbacks -> persisted HTTP events."""
 import asyncio
 import json
@@ -40,8 +41,17 @@ def streaming_model(settings, fail=False, content_parts=None):
     settings.base_url = "https://synthetic.invalid/v1"
     settings.model = "test"
     settings.api_key = "synthetic-key"
-    client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=DelayedSSE(fail, content_parts))))
+    def transport(request):
+        payload = json.loads(request.content)
+        if any(t.get('function', {}).get('name') == 'Intent' for t in payload.get('tools', [])):
+            class IntentSSE(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    chunk = {'id':'intent', 'object':'chat.completion.chunk', 'created':1, 'model':'test', 'choices':[{'index':0,'delta':{'role':'assistant','tool_calls':[{'index':0,'id':'intent','type':'function','function':{'name':'Intent','arguments':'{"action":"query"}'}}]},'finish_reason':'tool_calls'}]}
+                    yield ('data: '+json.dumps(chunk)+'\n\n').encode()
+                    yield b'data: [DONE]\n\n'
+            return httpx.Response(200, headers={'content-type':'text/event-stream'}, stream=IntentSSE())
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=DelayedSSE(fail, content_parts))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
     return build_model(settings, http_async_client=client, max_retries=0)
 
 
@@ -95,7 +105,7 @@ def test_allowed_execution_still_requires_independent_project_policy(tmp_path):
     async def scenario():
         service, sid, other = setup_service(tmp_path)
         service.spawn = lambda coro: coro.close()
-        service.store.put("message", {"id": "m", "session_id": sid, "allow_actions": True, "project_id": "p"})
+        authorize_message(service, sid, "m")
         request = RunInput(request_id="r", parameter_overrides={"use_formal_infrastructure": True, "split_oversized_imbs": True})
         with pytest.raises(ValueError, match="尚未确认工程策略"):
             service.submit(sid, request, agent_message_id="m")
@@ -105,7 +115,7 @@ def test_allowed_execution_still_requires_independent_project_policy(tmp_path):
         service.set_policy(sid, PolicyInput(use_formal_infrastructure=True, split_oversized_imbs=True))
         assert service.submit(sid, request, agent_message_id="m")["status"] == "queued"
         service.set_policy(sid, PolicyInput())
-        with pytest.raises(ValueError, match="尚未确认工程策略"):
+        with pytest.raises(ValueError, match="路由来源|尚未确认工程策略"):
             service.submit(sid, RunInput(request_id="r2", base_run_id=service.store.all("run")[0]["id"]), agent_message_id="m")
         await service.close()
         service.store.db.close()

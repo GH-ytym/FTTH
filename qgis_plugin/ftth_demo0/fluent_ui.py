@@ -9,14 +9,14 @@ if vendor not in sys.path:
     sys.path.append(vendor)
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QTextDocument, QFont, QTextTable, QTextLength, QColor, QPalette
+from qgis.PyQt.QtGui import QTextDocument, QFont, QTextTable, QTextLength, QColor, QPalette, QIcon
 from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton)
 from qfluentwidgets import (PushButton, PrimaryPushButton, TransparentPushButton,
     TransparentToolButton, ToolButton, setCustomStyleSheet,
     LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, DoubleSpinBox, CardWidget,
     ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, TitleLabel, SegmentedWidget,
-    FluentIcon as FIF)
+    FluentIcon as FIF, IndeterminateProgressRing, IconWidget)
 
 
 class Pages(QWidget):
@@ -118,6 +118,9 @@ class Conversation(ScrollArea):
         self.setWidget(self.body)
         self.activities = {}
         self.replies = {}
+        self.workflow_cards = {}
+        self.workflow_versions = {}
+        self.workflow_messages = set()
         self.scroll_timer = QTimer(self)
         self.scroll_timer.setSingleShot(True)
         self.scroll_timer.timeout.connect(self._scroll_to_bottom)
@@ -134,6 +137,8 @@ class Conversation(ScrollArea):
             self.replies[message_id] = card
             self.items.insertWidget(self.items.count() - 1, card)
         self.replies[message_id].update_reply(text, status, elapsed)
+        if message_id.startswith(('review_report_', 'completion_')):
+            self.replies[message_id].badge.setText('FTTH · 结果总结')
         if at_bottom:
             self.scroll_timer.start(0)
 
@@ -188,6 +193,9 @@ class Conversation(ScrollArea):
         self.scroll_timer.stop()
         self.activities.clear()
         self.replies.clear()
+        self.workflow_cards.clear()
+        self.workflow_versions.clear()
+        self.workflow_messages.clear()
         for i in reversed(range(self.items.count())):
             item = self.items.itemAt(i)
             widget = item.widget()
@@ -197,7 +205,39 @@ class Conversation(ScrollArea):
                 widget.deleteLater()
         self.empty.show()
 
-    def activity(self, key, text, status="running", elapsed=None):
+    def workflow_card(self, workflow, choose, cancel):
+        self.empty.hide()
+        bar = self.verticalScrollBar()
+        at_bottom = bar.maximum() - bar.value() < 60
+        key = workflow['id']
+        if key in self.workflow_cards:
+            old = self.workflow_cards.pop(key)
+            self.items.removeWidget(old)
+            old.hide()
+            old.deleteLater()
+        if workflow['status'] in {'completed', 'cancelled', 'failed', 'interrupted'}:
+            return
+        card = QWidget(self.body)
+        box = QVBoxLayout(card)
+        box.setContentsMargins(8, 4, 8, 4)
+        label = BodyLabel(workflow.get('detail', '') if workflow['status'] in {'waiting_choice', 'blocked'} else '', card)
+        label.setWordWrap(True)
+        box.addWidget(label)
+        label.setVisible(bool(label.text()))
+        for option in workflow.get('options', []):
+            action = PushButton(option['label'], card)
+            action.clicked.connect(lambda checked=False, oid=option['id']: choose(oid))
+            box.addWidget(action)
+        if workflow['status'] not in {'completed', 'cancelled', 'failed', 'interrupted'} and not workflow.get('options'):
+            action = PushButton('取消工作流', card)
+            action.clicked.connect(cancel)
+            box.addWidget(action)
+        self.workflow_cards[key] = card
+        self.items.insertWidget(self.items.count() - 1, card)
+        if at_bottom:
+            self.scroll_timer.start(50)
+
+    def activity(self, key, text, status="running", elapsed=None, role="main", resume=False):
         self.empty.hide()
         if key not in self.activities:
             widget = QWidget(self.body)
@@ -209,11 +249,21 @@ class Conversation(ScrollArea):
             hover_feedback(toggle)
             detail = BodyLabel("", widget)
             detail.setWordWrap(True)
-            detail.show()
-            toggle.clicked.connect(lambda: detail.setVisible(not detail.isVisible()))
-            layout.addWidget(toggle)
+            detail.hide()
+            row = QHBoxLayout()
+            icon = IconWidget(QIcon(str(Path(__file__).parent / "icons/review-shield.svg")) if role == "review" else FIF.ROBOT if role == "main" else FIF.SETTING, widget)
+            icon.setFixedSize(18, 18)
+            icon.setToolTip({"main": "主 Agent", "review": "独立审查 Agent", "algorithm": "算法执行器", "service": "服务端校验与调度"}.get(role, role))
+            row.addWidget(icon)
+            ring = IndeterminateProgressRing(widget)
+            ring.setFixedSize(16, 16)
+            ring.setStrokeWidth(2)
+            row.addWidget(ring)
+            row.addWidget(toggle, 1)
+            layout.addLayout(row)
             layout.addWidget(detail)
-            state = {"toggle": toggle, "detail": detail, "lines": [], "start": time.monotonic(), "status": "running", "elapsed": None}
+            state = {"widget": widget, "toggle": toggle, "ring": ring, "icon": icon, "role": role, "detail": detail, "expanded": False, "lines": [], "start": time.monotonic(), "status": "running", "elapsed": None}
+            toggle.clicked.connect(lambda: self._toggle_activity(state))
             self.activities[key] = state
             timer = QTimer(widget)
             state["timer"] = timer
@@ -223,23 +273,45 @@ class Conversation(ScrollArea):
         state = self.activities[key]
         previous_status = state["status"]
         if previous_status != "running" and status == "running":
-            return  # A delayed tool event cannot reopen a completed message/run.
+            if not resume:
+                return  # A delayed tool event cannot reopen a completed message/run.
+            state['timer'].start(1000)
+            state['ring'].show()
+            state['ring'].start()
+        if state["role"] != role:
+            state["icon"].setIcon(QIcon(str(Path(__file__).parent / "icons/review-shield.svg")) if role == "review" else FIF.ROBOT if role == "main" else FIF.SETTING)
+            state["icon"].setToolTip({"main": "主 Agent", "review": "独立审查 Agent", "algorithm": "算法执行器", "service": "服务端校验与调度"}.get(role, role))
+            state["role"] = role
         if status != "running" and elapsed is None:
             elapsed = time.monotonic() - state["start"]
         if text and (not state["lines"] or state["lines"][-1] != text):
             state["lines"].append(text)
         state.update(status=status, elapsed=elapsed)
         state["detail"].setText("\n".join(state["lines"]))
-        if status != "running" and previous_status == "running":
-            state["detail"].hide()
+        # Fluent labels can change visibility when their text changes. Keep the
+        # user's explicit expansion state authoritative, including replay.
+        state["detail"].setVisible(state["expanded"])
         if status != "running":
             state["timer"].stop()
+            state["ring"].stop()
+            state["ring"].hide()
         self._activity_label(state)
+
+    def _toggle_activity(self, state):
+        state['expanded'] = not state['expanded']
+        state['detail'].setVisible(state['expanded'])
+
+    def hide_activity(self, key):
+        if key in self.activities:
+            state = self.activities[key]
+            state['timer'].stop()
+            state['ring'].stop()
+            state['widget'].hide()
 
     def _activity_label(self, state):
         seconds = state["elapsed"] if state["elapsed"] is not None else time.monotonic() - state["start"]
         label = "执行中" if state["status"] == "running" else {"failed":"执行失败", "interrupted":"已中断", "cancelled":"已取消"}.get(state["status"], "已完成")
-        current = state["lines"][-1] if state["lines"] and state["status"] == "running" else label
+        current = state["lines"][-1] if state["lines"] else label
         state["toggle"].setText(f"{current} · {seconds:.1f} 秒  ﹀")
 
 
@@ -427,7 +499,7 @@ def build_ui(p, business_layers):
     p.message = Composer(composer)
     p.message.setFixedHeight(64)
     p.message.setStyleSheet("QTextEdit {background:transparent;border:none;padding:3px;color:#243247;font:14px 'Microsoft YaHei';}")
-    p.message.setPlaceholderText("描述你的需求…")
+    p.message.setPlaceholderText("描述需求，例如：开始完整规划、导出上次结果，或解释问题…")
     p.message.returnPressed.connect(p.send)
     box.addWidget(p.message)
     row = QHBoxLayout()
@@ -436,11 +508,6 @@ def build_ui(p, business_layers):
     attach.setToolTip("添加项目数据")
     attach.clicked.connect(lambda: p.tabs.setCurrentIndex(1))
     row.addWidget(attach)
-    p.action_mode = ComboBox(composer)
-    p.action_mode.addItem("检查与讨论", userData=False)
-    p.action_mode.addItem("允许执行", userData=True)
-    p.action_mode.setToolTip("仅在允许执行模式下，本条消息可提交规划或导出。工程策略在数据页保存。")
-    row.addWidget(p.action_mode)
     row.addStretch()
     p.send_button = ToolButton(FIF.UP, composer)
     p.send_button.clicked.connect(p.send)
@@ -518,6 +585,11 @@ def build_ui(p, business_layers):
     row.addWidget(button("校验参数", lambda: p.manual(False)))
     row.addWidget(button("运行新方案", lambda: p.manual(True), True, FIF.PLAY))
     box.addLayout(row)
+    p.manual_auto_repair = CheckBox("搜索失败时自动重算一次", c)
+    p.manual_auto_repair.setToolTip("仅增加搜索预算，不修改数据或工程约束；关闭后仍会审查。")
+    p.manual_auto_repair.setChecked(p.settings.value("manual_auto_repair", True, type=bool))
+    p.manual_auto_repair.toggled.connect(lambda value: p.settings.setValue("manual_auto_repair", value))
+    box.addWidget(p.manual_auto_repair)
     layout.addWidget(c)
     layout.addStretch()
     p.tabs.addTab(area, "数据")
@@ -526,7 +598,7 @@ def build_ui(p, business_layers):
     c, box = card(page, "方案与运行", "选择批次，查看报告、回到地图或导出交付成果。")
     p.runs = ComboBox(c)
     box.addWidget(p.runs)
-    for actions in [[("查看报告", p.run_report), ("显示此版", p.display), ("导出此版", p.export)], [("加载此版参数", p.load_parameters), ("取消任务", p.cancel)]]:
+    for actions in [[("查看报告", p.run_report), ("显示此版", p.display), ("导出此版", p.export)], [("加载此版参数", p.load_parameters), ("取消工作流", p.cancel)], [("审查报告", p.review_report), ("补充审查", p.request_review)]]:
         row = QHBoxLayout()
         for label, callback in actions:
             row.addWidget(button(label, callback))
@@ -562,6 +634,13 @@ def build_ui(p, business_layers):
     box.addWidget(p.token)
     box.addWidget(button("选择令牌文件", p.choose_token, icon=FIF.FOLDER))
     box.addWidget(button("测试连接", lambda: p.api("GET", "/health", callback=p.report), True))
+    layout.addWidget(c)
+    c, box = card(page, "对话运行偏好", "明确要求规划或导出即可执行；讨论、假设和询问不会启动计算。")
+    p.auto_repair = CheckBox("搜索失败时自动重算一次", c)
+    p.auto_repair.setToolTip("完整规划未找到可行路径或组合时，允许增加搜索预算并重算一次。\n不修改输入数据、容量或工程策略；关闭后仍会审查。偏好会保存，每次发送时记录。")
+    p.auto_repair.setChecked(p.settings.value("chat_auto_repair", True, type=bool))
+    p.auto_repair.toggled.connect(lambda value: p.settings.setValue("chat_auto_repair", value))
+    box.addWidget(p.auto_repair)
     layout.addWidget(c)
     layout.addStretch()
     p.tabs.addTab(area, "设置")

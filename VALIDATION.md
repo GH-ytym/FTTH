@@ -1,4 +1,18 @@
-# 验证记录（2026-09-25）
+# 验证记录
+
+## 0.5.0（2026-09-26）
+
+- 最终回归：**95 passed, 1 skipped**。跳过项是当前 Windows 环境没有创建符号链接的权限；目录越界、文件哈希篡改及输入快照变更检查均已执行。
+- 新增覆盖：真实 LangChain 审查工具循环、结构纠正与累计生成预算、模型超时／错误隔离、无模型降级、空报告不能通过、伪造证据引用、注入内容不能获得执行工具、跨会话访问、并发一次修复、策略撤销、后续规划取代、排队修复授权复查、取消和重启、补审幂等及结果比较。
+- QGIS 3.44.14 环境和 64 个冻结算法文件 SHA-256：PASS。`vendor/` 未修改。
+- 真实 51IMB + 真实算法 + HTTP API + 脚本化审查模型 + 正式导出：PASS，运行 `run_54e1c95de74843dc`；验收记录 `runtime/release-0.5.0/e2e-bf9d829a/acceptance.json`。最终证据合同改动后，再对同一批真实成果补审通过，未再次规划。
+- 默认 profile 安装后的实际 QGIS/Qt 验收：审查报告、补审、独立状态、执行／检查模式开关、历史恢复及 480px 布局 PASS；原有 SSE 流式回复、计时、复制及会话切换回归 PASS。
+- 插件更新前备份：`runtime/plugin-backups/ftth_demo0-20260926-101925`。未终止用户已打开的 QGIS 或旧后端，需重启加载新版。
+- 当前终端没有真实模型配置，**未执行真实千问／其他供应商审查效果验证**。脚本化模型验证不等于真实审查准确性验收。
+
+以下为历史版本记录，不代表当前测试数量。
+
+## 2026-09-25 历史记录
 
 ## Qwen 接入补充
 
@@ -61,3 +75,28 @@
 - `qgis_ui_smoke.py --http` passed against the running backend: actual async Qt HTTP polling, eight map layers and successful display acknowledgement.
 - Backend regression: 26 passed. Plugin ZIP includes dependencies and license metadata; default profile updated with backup in `runtime/plugin-backups`.
 - User must restart the already-open QGIS process to load the updated plugin. The interactive desktop was not restarted automatically to preserve its map state.
+# 0.6.0 固定工作流验收（2026-09-26）
+
+- 自动化回归 118 通过、1 跳过（Windows 链接权限）。覆盖缺失意图、执行权限、并发选择、参数变体防重、事务失败回滚、旧选项、撤销授权、输入篡改、模型超时与取消、数据库迁移及重启不重放。
+- `verify_review_ui.py --workflow-ui`：真实 QGIS Qt 选择卡片、恢复、重复点击、审查步骤与动画通过。
+- `verify_streaming_ui.py`：真实 SSE 正文增长、历史恢复、复制及窄屏通过。
+- `verify_reviews.py --workflow`：真实 51 IMB 数据规划、假模型独立审查和正式导出通过，记录 `runtime/release-0.6.0/e2e-7c9d84ae/acceptance.json`。
+- `check_env.py`：QGIS 3.44.14，冻结算法 64 文件哈希 PASS。
+- 真实 Qwen 需求识别及审查尚未验收：当前执行进程无模型凭据。可在已配置模型的终端运行 `verify_reviews.py --workflow --real-model`，不得以假模型结果替代。
+
+
+### 2026-09-26 聊天进度展示修订
+
+- 同一次主流程、算法运行和审查各复用状态行，步骤文本原位更新，日志按用户展开状态显示；不再生成通知专用的零秒 Agent 状态行。
+- 工作流开场显示本次安排，计算完成通过状态行呈现，审查结束合并说明计算结果、审查分级、优先复核项及重算状态。补审继续单独通知。
+- 历史按事件顺序恢复，保留消息快照用于中断和流式恢复；按工作流更新时间拒绝旧响应，避免已提交后重新出现选择卡片。
+- 固定报告/假模型自动回归与真实 QGIS Qt 界面验证覆盖：默认折叠、同一行更新、手动展开、选择卡片恢复、乱序响应、重复点击、普通聊天流式和复制。真实在线模型未新增验证；算法与自动修复权限未修改。
+
+### 2026-09-26 自然语言执行授权
+
+- 移除聊天执行模式开关。LLM 识别本轮动作，服务端记录用户原文和动作授权，并验证消息、会话、项目及工作流状态；规划授权不能用于导出，历史记录和后台通知不能提供新授权。旧 `allow_actions` 字段仅兼容接收并忽略。
+- 设置页保存对话自动重算偏好，手动运行单独记忆。关闭自动重算仍完成独立审查；启用时沿用一次额度和搜索参数白名单。
+- `python -m pytest -q`：140 通过、1 跳过（Windows 链接权限）。覆盖无模式的规划和导出、旧字段不能授权或拒绝执行、查询/讨论/澄清分支无执行权、授权篡改、关闭重算仍审查、一次重算限制及原工程策略校验。
+- `verify_review_ui.py --workflow-ui` 和 `verify_streaming_ui.py` 通过。真实 QGIS Qt 验证无执行模式的发送、持久化偏好、历史恢复、选择卡片、重复点击及 480px 布局；已查看 `runtime/release-0.5.0/rerun-preferences.png` 和 `workflow-submitted.png`。
+- `verify_reviews.py --workflow` 通过：真实 51 IMB 数据完成规划、独立审查和导出，规划与导出均从不含 `allow_actions` 的聊天消息提交。记录：`runtime/release-0.6.0/e2e-61972dd9/acceptance.json`。
+- 上述模型环节使用脚本模型，验证工作流和授权边界，不作为自然语言识别准确率证明。当前终端没有真实模型配置；在线模型验证仍可在配置后运行 `verify_reviews.py --workflow --real-model`。

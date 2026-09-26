@@ -1,3 +1,4 @@
+from conftest import authorize_message
 import asyncio
 import json
 
@@ -16,7 +17,7 @@ def test_model_tools_decode_object_and_preserve_inheritance(tmp_path):
     tools = {t.name: t for t in AgentController(service, None).tools(sid, "msg")}
     changes = {"use_formal_infrastructure": True, "use_recognition_roads": False, "split_oversized_imbs": True}
     service.set_policy(sid, PolicyInput(**changes))
-    service.store.put("message", {"id": "msg", "session_id": sid, "allow_actions": True, "project_id": "p"})
+    authorize_message(service, sid, "msg")
     args = {"scope": "full", "parameter_overrides": changes}
     assert tools["validate_inputs"].invoke(args)["valid"]
     encoded = {**args, "parameter_overrides": json.dumps(changes)}
@@ -24,7 +25,9 @@ def test_model_tools_decode_object_and_preserve_inheritance(tmp_path):
     first = asyncio.run(tools["submit_planning"].ainvoke(encoded))
     assert first["parameters"]["use_formal_infrastructure"] is True
     assert asyncio.run(tools["submit_planning"].ainvoke(args))["id"] == first["id"]
-    second = asyncio.run(tools["submit_planning"].ainvoke({"base_run_id": first["id"],
+    authorize_message(service, sid, 'msg2')
+    second_tools = {t.name:t for t in AgentController(service, None).tools(sid, 'msg2')}
+    second = asyncio.run(second_tools["submit_planning"].ainvoke({"base_run_id": first["id"],
         "parameter_overrides": '{"zpm_max_cap":600}'}))
     assert second["parameters"]["zpm_max_cap"] == 600
     assert second["parameters"]["use_formal_infrastructure"] is True
