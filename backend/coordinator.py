@@ -36,7 +36,7 @@ class TaskCoordinator:
         if not task:
             return None
         result = self.snapshot(task)
-        result['workers'] = [w for w in self.store.all('worker') if w.get('task_id') == task['id']][-6:]
+        result['workers'] = self.store.find('worker', task['session_id'], task_id=task['id'])[-6:]
         return result
 
     def read_turns(self, sid, message_ids, offset=0):
@@ -132,7 +132,7 @@ class TaskCoordinator:
         """A structured mailbox: identity and parent revision precede results."""
         key = actor + ':' + record['id']
         with self.store.lock:
-            old = next((w for w in self.store.all('worker') if w['id'] == key), None)
+            old = self.store.lookup('worker', key)
             if old and old['status'] in TERMINAL_WORKER and old['status'] != record['status']:
                 return old  # Ignore delayed progress or duplicate terminal changes.
             worker = {**(old or {}), 'id': key, 'actor': actor, 'session_id': record['session_id'],
@@ -159,13 +159,13 @@ class TaskCoordinator:
         Clarification and workflow replies bypass the Q&A model, so its tool
         checkpoint is not a complete conversation history.
         """
-        messages = self.store.all('message')
+        messages = self.store.find('message', item['session_id'])
         # INSERT OR REPLACE changes rowid when an older reply is updated.
         # Creation time, rather than last write order, defines conversation order.
         if all(m.get('created') is not None for m in messages):
             messages.sort(key=lambda m: m['created'])
         position = next((i for i, m in enumerate(messages) if m['id'] == item['id']), len(messages))
-        workflows = {w['id']: w for w in self.store.all('workflow') if w['session_id'] == item['session_id']}
+        workflows = {w['id']: w for w in self.store.find('workflow', item['session_id'])}
         turns = []
         for i, message in enumerate(messages):
             if (message['id'] == item['id'] or message['session_id'] != item['session_id'] or

@@ -1,22 +1,26 @@
 import asyncio
+import contextlib
 import contextvars
 import copy
 import hashlib
 import json
+import logging
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
 
-from .models import Parameters, RunInput
+from .models import Parameters, PolicyInput, RunInput
 from .settings import ROOT, VENDOR
 from .store import uid
 from .progress import algorithm_step
 from .instance_lock import DataDirectoryLock
-from .models import PolicyInput
 from .titles import valid_title, fallback_title
 from .coordinator import TaskCoordinator
+
+logger = logging.getLogger("ftth.service")
 
 
 def read_json(path):
@@ -91,7 +95,7 @@ class Service:
                     run_id=run["id"], review_id=review["id"], status="interrupted", summary=run["review"])
         for session in store.all("session"):
             if session.get("title") != "新对话" and not valid_title(session.get("title")):
-                first = next((m for m in store.all("message") if m["session_id"] == session["id"] and not m.get("notification")), None)
+                first = next((m for m in store.find("message", session["id"]) if not m.get("notification")), None)
                 if first:
                     session["title"] = fallback_title(first["content"])
                     store.put("session", session)
@@ -101,7 +105,6 @@ class Service:
         task = asyncio.create_task(coro, context=contextvars.Context())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
-        return task
         return task
 
     async def close(self):
@@ -402,15 +405,20 @@ class Service:
                                                           creationflags=subprocess.CREATE_NO_WINDOW)
             await killer.wait()
         else:
-            proc.kill()
+            # The worker leads its own session, so this also stops the algorithm
+            # subprocesses it started, like taskkill /T on Windows.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
         await proc.wait()
 
     async def process(self, args, log, run_id=None):
         if run_id and self.store.get("run", run_id)["status"] == "cancelled":
             return -1, ""
-        creation = asyncio.create_task(asyncio.create_subprocess_exec(str(self.settings.qgis / "bin/python.exe"), *args,
+        # First use probes the interpreter; keep that off the event loop.
+        runtime = await asyncio.to_thread(self.settings.runtime)
+        creation = asyncio.create_task(asyncio.create_subprocess_exec(str(runtime.python), *args,
             env=self.settings.worker_env(), cwd=str(VENDOR), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=4 * 1024 * 1024,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {})))
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True})))
         try:
             proc = await asyncio.shield(creation)
         except asyncio.CancelledError:
@@ -487,6 +495,7 @@ class Service:
             directory = self.settings.data / "runs" / run_id
             directory.mkdir(parents=True)
             run.update(status="running", directory=str(directory), started=time.time())
+            logger.info("run %s started (%s, scope=%s)", run_id, run["kind"], run.get("scope"))
             self.store.put("run", run)
             self.store.event(run["session_id"], "run", run_id=run_id, status="running")
             if self.workflows:
@@ -497,6 +506,11 @@ class Service:
                     args = [str(VENDOR / "delivery_exporter.py"), "--run-dir", source["result"]["output_dir"], "--output-root", str(directory / "delivery")]
                     prefix = "FTTH_EXPORT_RESULT="
                 else:
+                    runtime = await asyncio.to_thread(self.settings.runtime)
+                    missing = sorted(set(runtime.missing) - {"qgis", "osgeo"})
+                    if run["scope"] == "full" and missing:
+                        raise ValueError("QGIS Python 缺少完整规划所需模块 " + "、".join(missing) +
+                            "；运行 `ftth doctor --fix` 安装到应用目录后重试")
                     project = self.store.get("project", run["project_id"])
                     self.verify_snapshot(project)
                     write_json(directory / "input_snapshot.json", project)
@@ -528,7 +542,10 @@ class Service:
             except asyncio.CancelledError:
                 run.update(status="interrupted", error="服务停止，任务中断")
                 raise
+            except TimeoutError:
+                run.update(status="failed", error=f"算法运行超过 {self.settings.timeout} 秒，已终止（配置项 run.timeout / FTTH_RUN_TIMEOUT）")
             except Exception as exc:
+                logger.warning("run %s failed before completion", run_id, exc_info=True)
                 run.update(status="failed", error=str(exc) or type(exc).__name__)
             finally:
                 if self.store.get("run", run_id)["status"] == "cancelled":
@@ -540,6 +557,7 @@ class Service:
                     run["workflow_cancelled"] = True
                 self.store.put("run", run)
                 write_json(directory / "run.json", run)
+                logger.info("run %s %s (exit=%s, %.1fs)", run_id, run["status"], run.get("exit_code"), run["finished"] - run["started"])
                 self.store.event(run["session_id"], "run", run_id=run_id, status=run["status"], elapsed_seconds=round(run["finished"] - run["started"], 1))
             if self.reviewer and run["kind"] == "planning":
                 self.reviewer.enqueue(run["session_id"], run_id, "automatic:" + run_id, automatic=True)
@@ -574,7 +592,7 @@ class Service:
                 workflow = self.store.get('workflow', root['workflow_id'])
                 self.workflows.publish(workflow, status='cancelled', detail='工作流已取消', options=[])
             self.store.put("run", root)
-            targets = [r for r in self.store.all("run") if r["id"] == root_id or r.get("repair_root_id") == root_id]
+            targets = [r for r in self.store.find("run", session_id) if r["id"] == root_id or r.get("repair_root_id") == root_id]
             for target in targets:
                 target["workflow_cancelled"] = True
                 if target["status"] in ("queued", "running"):

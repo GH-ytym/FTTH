@@ -37,6 +37,8 @@ junit.xml
 *.log
 *.pid
 connection.token
+# Written by `ftth plugin install` into installed copies; never part of the source.
+qgis_plugin/ftth_demo0/connection.json
 service.lock
 
 # Credentials and machine settings

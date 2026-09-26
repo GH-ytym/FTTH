@@ -1,5 +1,5 @@
 import asyncio
-from pathlib import Path
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +19,12 @@ def setup_service(tmp_path):
         "summary": {"imb_count": 3, "nro_count": 1, "oversized_imbs": [], "infrastructure_count": 3}})
     a, b = service.session("p")["id"], service.session("p")["id"]
     return service, a, b
+
+
+def use_host_python(service):
+    """Process control tests need any Python child, not the QGIS runtime."""
+    from backend.qgis_runtime import QgisRuntime
+    service.settings.use_runtime(QgisRuntime.host())
 
 
 def test_strict_parameters():
@@ -130,13 +136,13 @@ def test_snapshot_tampering(tmp_path):
         service.verify_snapshot(project)
 
 
-@pytest.mark.skipif(not Path("D:/osgeo/bin/python.exe").exists(), reason="Requires local QGIS runtime")
 def test_real_process_cancel_and_timeout(tmp_path):
     async def scenario():
         service, sid, _ = setup_service(tmp_path)
+        use_host_python(service)
         service.store.put("run", {"id": "cancel-test", "session_id": sid, "status": "running"})
         task = asyncio.create_task(service.process(["-c", "import time; time.sleep(60)"], tmp_path / "cancel.log", "cancel-test"))
-        for _ in range(100):
+        for _ in range(1500):  # Cold process start on Windows can exceed a second.
             if "cancel-test" in service.processes:
                 break
             await asyncio.sleep(0.01)
@@ -148,4 +154,28 @@ def test_real_process_cancel_and_timeout(tmp_path):
         service.settings.timeout = 0.1
         with pytest.raises(TimeoutError):
             await service.process(["-c", "import time; time.sleep(60)"], tmp_path / "timeout.log")
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses taskkill /T for the process tree")
+def test_cancel_stops_algorithm_grandchildren(tmp_path):
+    async def scenario():
+        service, sid, _ = setup_service(tmp_path)
+        use_host_python(service)
+        service.store.put("run", {"id": "tree", "session_id": sid, "status": "running"})
+        marker, started = tmp_path / "grandchild-finished.txt", tmp_path / "grandchild-started.txt"
+        grandchild = tmp_path / "grandchild.py"
+        grandchild.write_text(f"import time\nopen({str(started)!r}, 'w').close()\ntime.sleep(1)\nopen({str(marker)!r}, 'w').close()\n")
+        worker = tmp_path / "worker.py"
+        worker.write_text(f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, {str(grandchild)!r}])\ntime.sleep(60)\n")
+        task = asyncio.create_task(service.process([str(worker)], tmp_path / "tree.log", "tree"))
+        for _ in range(500):
+            if started.exists():
+                break
+            await asyncio.sleep(.01)
+        assert started.exists()
+        await service.cancel(sid, "tree")
+        await task
+        await asyncio.sleep(1.5)
+        assert not marker.exists()
     asyncio.run(scenario())

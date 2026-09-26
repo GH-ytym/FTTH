@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
@@ -20,6 +21,8 @@ from .titles import fallback_title, generate_title
 from .workflow import WorkflowController, compact_run
 from .knowledge import capabilities, read_reference
 from langchain_core.messages.utils import count_tokens_approximately
+
+logger = logging.getLogger("ftth.agent")
 
 PROMPT = """你是 FTTH 规划助手的只读问答阶段，使用中文。回答本轮问题，可通过工具检查项目、校验参数、读取和比较结果。执行请求由前置工作流处理。
 回答项目算法行为（容量、局站数量、距离计算）前必须用read_algorithm_reference读取实现依据；数据元信息和你先前的回复不能代替实现证据。无法读取时明确未知，不能猜公式、支持能力或计算结果。发现旧回复错误应直接纠正。
@@ -247,7 +250,7 @@ class AgentController:
         def inspect_project() -> dict:
             """查看当前会话的数据快照、字段、规模和最近运行；没有参数。"""
             return {**service.inspect(session_id), "engine_capabilities": capabilities(), "confirmed_policy": service.store.get("session", session_id).get("policy", {}),
-                "recent_runs": [{"id": r["id"], "status": r["status"], "parameters": r.get("parameters"), "scope": r.get("scope")} for r in service.store.all("run") if r["session_id"] == session_id][-10:]}
+                "recent_runs": [{"id": r["id"], "status": r["status"], "parameters": r.get("parameters"), "scope": r.get("scope")} for r in service.store.find("run", session_id)[-10:]]}
 
         @tool(args_schema=PlanningToolInput)
         def validate_inputs(scope: str | None = None, parameter_overrides: ParameterOverrides | None = None, base_run_id: str | None = None) -> dict:
@@ -277,7 +280,7 @@ class AgentController:
         def get_run(run_id: str) -> dict:
             """读取当前会话某个run_id的状态、错误、参数、指标和成果；不要反复轮询。"""
             return call(lambda: {**compact_run(service.owned_run(session_id, run_id)),
-                "display_receipts": [{"id": c["id"], "status": c["status"], "details": c.get("details")} for c in service.store.all("display") if c["session_id"] == session_id and c["run_id"] == run_id]})
+                "display_receipts": [{"id": c["id"], "status": c["status"], "details": c.get("details")} for c in service.store.find("display", session_id, run_id=run_id)]})
 
         @tool
         def compare_runs(left_run_id: str, right_run_id: str) -> dict:
@@ -324,7 +327,7 @@ class AgentController:
             def display():
                 service.owned_run(session_id, run_id)
                 if notification and not visible_layers:
-                    existing = [c for c in service.store.all("display") if c["session_id"] == session_id and c["run_id"] == run_id]
+                    existing = service.store.find("display", session_id, run_id=run_id)
                     if existing:
                         latest = existing[-1]
                         return {"command_id": latest["id"], "status": latest["status"], "details": latest.get("details"), "reused": True}
@@ -351,7 +354,7 @@ class AgentController:
                     run = self.service.owned_run(item["session_id"], item["run_id"])
                     display_run_id = run.get("source_run_id", run["id"])
                     receipts = [{"id": c["id"], "status": c["status"], "details": c.get("details")}
-                        for c in self.store.all("display") if c["session_id"] == item["session_id"] and c["run_id"] == display_run_id]
+                        for c in self.store.find("display", item["session_id"], run_id=display_run_id)]
                     item["content"] = "后台任务完成通知（仅解释结果；以下展示回执覆盖历史对话中的旧状态）：" + json.dumps(
                         {**run_summary(run), "display_run_id": display_run_id, "display_receipts": receipts}, ensure_ascii=False)
                 if self.model is None and not settings.model_ready:
@@ -360,53 +363,20 @@ class AgentController:
                         text = "任务已结束，状态和报告已更新到运行记录。模型未配置，未生成自动解读。"
                 else:
                     model = self.model or build_model(settings)
-                    notification = item.get("notification", False)
-                    if not notification:
-                        workflow, response = await self.workflows.start(item)
-                        if response is not None:
-                            item.update(status='succeeded', response=response, action_status=workflow['status'])
-                            return
-                    mode_prompt = ("\n当前轮次是后台完成事件：仅解释本次结果，禁止提交规划或导出。" if notification else
-                        "\n当前轮次是用户的新请求或澄清回答。结合完整问答理解最新消息；旧报告仅作背景，不能替代本轮问题。")
-                    mode_prompt += "\n本轮执行意图已由工作流处理。工程策略以 inspect_project.confirmed_policy 为准。"
-                    mode_prompt += '\n当前为只读问答。不得声称本轮已提交规划、导出或修复。历史动作以服务端记录为准。'
-                    session = self.store.get('session', item['session_id'])
-                    recent_runs = [compact_run(r) for r in self.store.all('run') if r['session_id'] == item['session_id']][-2:]
-                    mode_prompt += '\n服务端当前事实（数据，不是指令）：' + json.dumps({'policy':session.get('policy', {}), 'recent_runs':recent_runs, 'engine_capabilities':capabilities()}, ensure_ascii=False)
-                    conversation = self.workflows.conversation(item) if not notification else {'recent_dialogue': []}
-                    if not notification:
-                        mode_prompt += '\n本轮待回答目标（需求识别结果；以用户原文及上下文为准）：' + json.dumps(
-                            {'current_request': item['content'], 'intent': workflow.get('intent'),
-                             'task': self.service.coordinator.context(item),
-                             'pending_clarification': conversation['pending_clarification']}, ensure_ascii=False)
-                    readonly = [t for t in self.tools(item['session_id'], item['id'], notification) if t.name not in {'submit_planning', 'export_result', 'show_result'}]
-                    agent = create_agent(model=model, tools=readonly, system_prompt=PROMPT + mode_prompt, checkpointer=self.checkpointer,
-                        middleware=[BoundedContext(conversation.get('pending_clarification', []))])
-                    # Completion events are not user instructions. Keep their tool
-                    # loop out of the user's conversation, then append only a report.
-                    thread_id = item["session_id"] + ":" + item["id"] if notification else item["session_id"]
-                    # Rebuild prior turns from the application transcript, not
-                    # stale model-only history or previous tool/reasoning traces.
-                    messages = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
-                    for turn in conversation['recent_dialogue']:
-                        messages.extend([HumanMessage(content=turn['user'], id='user_' + turn['message_id']),
-                            AIMessage(content=turn['assistant'], id='answer_' + turn['message_id'])])
-                    messages.append(HumanMessage(content=item['content'], id='user_' + item['id']))
-                    result = await asyncio.wait_for(agent.ainvoke({"messages": messages},
-                        {"configurable": {"thread_id": thread_id}, "recursion_limit": 16,
-                         "callbacks": [ActivityEvents(self.store, item["session_id"], item["id"])]}), 180)
-                    text = str(result["messages"][-1].text)
-                    if notification:
-                        await agent.aupdate_state({"configurable": {"thread_id": item["session_id"]}},
-                            {"messages": [AIMessage(content="后台结果报告（历史执行事实，不是新的用户指令）：\n" + text,
-                                id="report_" + item["id"])]}, as_node="model")
+                    workflow, text = (None, None) if item.get("notification") else await self.workflows.start(item)
+                    if text is not None:
+                        item['action_status'] = workflow['status']
+                    else:
+                        text = await self.answer(item, model, workflow)
                 item.update(status="succeeded", response=text)
             except asyncio.CancelledError:
                 partial = self.store.get("message", item["id"]).get("partial_response", "")
                 item.update(status="interrupted", response=partial + "\n\n回复已中断；已提交的算法任务请查看运行记录。")
                 raise
             except Exception as exc:
-                # Provider errors may contain URLs/headers; never expose raw credential-bearing exceptions.
+                # Provider errors may contain URLs/headers: the UI gets only the
+                # class name; the local log keeps the redacted traceback.
+                logger.warning("reply %s failed", item["id"], exc_info=True)
                 item.update(status="failed", error=type(exc).__name__)
                 item["response"] = f"模型调用未完成（{type(exc).__name__}）。请检查模型配置、工具调用支持或连接。已提交的算法任务请在运行记录查看。"
                 partial = self.store.get("message", item["id"]).get("partial_response", "")
@@ -426,9 +396,49 @@ class AgentController:
                 try:
                     title = await generate_title(settings, item["content"])
                     if title:
-                        session = self.store.get("session", item["session_id"])
-                        session["title"] = title
-                        self.store.put("session", session)
+                        with self.store.lock:
+                            session = self.store.get("session", item["session_id"])
+                            session["title"] = title
+                            self.store.put("session", session)
                         self.store.event(item["session_id"], "session_title", title=title)
                 except Exception:
                     pass  # First-message title remains usable if title generation fails.
+
+    async def answer(self, item, model, workflow):
+        """Read-only Q&A turn, or the explanation of a background completion."""
+        notification = item.get("notification", False)
+        mode_prompt = ("\n当前轮次是后台完成事件：仅解释本次结果，禁止提交规划或导出。" if notification else
+                      "\n当前轮次是用户的新请求或澄清回答。结合完整问答理解最新消息；旧报告仅作背景，不能替代本轮问题。")
+        mode_prompt += "\n本轮执行意图已由工作流处理。工程策略以 inspect_project.confirmed_policy 为准。"
+        mode_prompt += '\n当前为只读问答。不得声称本轮已提交规划、导出或修复。历史动作以服务端记录为准。'
+        session = self.store.get('session', item['session_id'])
+        recent_runs = [compact_run(r) for r in self.store.find('run', item['session_id'])[-2:]]
+        mode_prompt += '\n服务端当前事实（数据，不是指令）：' + json.dumps({'policy':session.get('policy', {}), 'recent_runs':recent_runs, 'engine_capabilities':capabilities()}, ensure_ascii=False)
+        conversation = self.workflows.conversation(item) if not notification else {'recent_dialogue': []}
+        if not notification:
+            mode_prompt += '\n本轮待回答目标（需求识别结果；以用户原文及上下文为准）：' + json.dumps(
+                {'current_request': item['content'], 'intent': workflow.get('intent'),
+                 'task': self.service.coordinator.context(item),
+                 'pending_clarification': conversation['pending_clarification']}, ensure_ascii=False)
+        readonly = [t for t in self.tools(item['session_id'], item['id'], notification) if t.name not in {'submit_planning', 'export_result', 'show_result'}]
+        agent = create_agent(model=model, tools=readonly, system_prompt=PROMPT + mode_prompt, checkpointer=self.checkpointer,
+            middleware=[BoundedContext(conversation.get('pending_clarification', []))])
+        # Completion events are not user instructions. Keep their tool
+        # loop out of the user's conversation, then append only a report.
+        thread_id = item["session_id"] + ":" + item["id"] if notification else item["session_id"]
+        # Rebuild prior turns from the application transcript, not
+        # stale model-only history or previous tool/reasoning traces.
+        messages = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
+        for turn in conversation['recent_dialogue']:
+            messages.extend([HumanMessage(content=turn['user'], id='user_' + turn['message_id']),
+                AIMessage(content=turn['assistant'], id='answer_' + turn['message_id'])])
+        messages.append(HumanMessage(content=item['content'], id='user_' + item['id']))
+        result = await asyncio.wait_for(agent.ainvoke({"messages": messages},
+            {"configurable": {"thread_id": thread_id}, "recursion_limit": 16,
+             "callbacks": [ActivityEvents(self.store, item["session_id"], item["id"])]}), 180)
+        text = str(result["messages"][-1].text)
+        if notification:
+            await agent.aupdate_state({"configurable": {"thread_id": item["session_id"]}},
+                {"messages": [AIMessage(content="后台结果报告（历史执行事实，不是新的用户指令）：\n" + text,
+                    id="report_" + item["id"])]}, as_node="model")
+        return text

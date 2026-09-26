@@ -8,8 +8,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from backend.agent import AgentController, BoundedContext
-from backend.models import PolicyInput, RunInput, WorkflowChoice
-from backend.workflow import Intent, WorkflowController, compact_run
+from backend.models import Parameters, PolicyInput, RunInput, WorkflowChoice
+from backend.workflow import Intent, WorkflowController
 from backend.store import Store
 from test_agent import FakeToolModel
 from test_service import setup_service
@@ -206,7 +206,7 @@ def test_migration_backup_and_restart_never_replays(tmp_path):
     c.execute('CREATE TABLE objects (kind TEXT,id TEXT,data TEXT,PRIMARY KEY(kind,id))')
     c.commit(); c.close()
     store = Store(path)
-    assert list(tmp_path.glob('legacy.sqlite.pre-0.6.0-*.bak'))
+    assert list(tmp_path.glob('legacy.sqlite.pre-schema-v*.bak'))
     store.db.close()
     service, controller, item, _ = fixture(tmp_path)
     w, _ = asyncio.run(controller.start(item))
@@ -283,7 +283,6 @@ def test_snapshot_tampering_at_choice_blocks_run(tmp_path):
 
 
 def test_current_input_is_not_truncated_to_fit_budget():
-    from types import SimpleNamespace
     from langchain_core.messages import HumanMessage
     class Request:
         messages = [HumanMessage(content='新任务' * 50000)]
@@ -344,3 +343,20 @@ def test_workflow_has_one_combined_completion_notice(tmp_path):
         assert '0 项错误、1 项警告、3 项说明' in text
         assert '需要确认管孔容量' in text and '本次未自动重算' in text
     asyncio.run(scenario())
+
+
+def test_use_latest_follows_creation_not_last_update(tmp_path):
+    service, controller, item, _ = fixture(tmp_path, model=IntentModel(use_latest=True))
+    sid = item['session_id']
+    for rid, created in (('run_older', 1.0), ('run_newer', 2.0)):
+        service.store.put('run', {'id': rid, 'session_id': sid, 'project_id': 'p', 'kind': 'planning',
+            'status': 'succeeded', 'scope': 'full', 'created': created,
+            'parameters': Parameters(use_formal_infrastructure=True, split_oversized_imbs=True).model_dump()})
+    # Review progress rewrites its run; that must not make the older run "latest".
+    older = service.store.get('run', 'run_older')
+    older['review'] = {'status': 'running'}
+    service.store.put('run', older)
+    assert [r['id'] for r in service.store.find('run', sid)] == ['run_older', 'run_newer']
+    w, _ = asyncio.run(controller.start(item))
+    assert w['status'] == 'submitted'
+    assert service.store.get('run', w['run_id'])['base_run_id'] == 'run_newer'

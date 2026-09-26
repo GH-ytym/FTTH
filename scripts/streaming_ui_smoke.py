@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-plugin_dir = Path(os.environ["APPDATA"]) / "QGIS/QGIS3/profiles/default/python/plugins" if os.environ.get("DEMO_TEST_INSTALLED") else ROOT / "qgis_plugin"
+# DEMO_TEST_PLUGINS points at an installed copy; otherwise test the source tree.
+plugin_dir = Path(os.environ.get("DEMO_TEST_PLUGINS") or ROOT / "qgis_plugin")
 sys.path[:0] = [str(ROOT / "vendor/ftth"), str(plugin_dir)]
 from task_bridge import prepare_qgis_runtime
 handles = prepare_qgis_runtime()
@@ -26,11 +27,16 @@ from qgis.PyQt.QtCore import qInstallMessageHandler
 qInstallMessageHandler(lambda kind, context, message: print("QT:", message, file=sys.__stderr__, flush=True))
 
 p = Panel(None)
+if os.environ.get("DEMO_TEST_EXPECT_AUTOCONNECT"):
+    # `ftth plugin install` recorded this backend; no manual token selection.
+    assert p.url.text() == os.environ["DEMO_TEST_URL"], p.url.text()
+    assert p.token.text() == os.environ["DEMO_TEST_TOKEN"]
+    print("Verified install-time auto-connection", flush=True)
 p.url.setText(os.environ["DEMO_TEST_URL"])
 p.token.setText(os.environ["DEMO_TEST_TOKEN"])
 p.resize(480, 780)
 p.show()
-out = ROOT / "runtime/release-0.5.0"
+out = ROOT / "runtime/ui-screenshots"
 out.mkdir(parents=True, exist_ok=True)
 
 def wait_for(predicate, timeout=20):
@@ -97,7 +103,6 @@ p.close()
 print("Closed panel", flush=True)
 p.deleteLater()
 print("Queued panel deletion", flush=True)
-from qgis.PyQt.QtCore import QCoreApplication, QEvent
 QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 app.processEvents()
 print("Deleted panel widgets", flush=True)

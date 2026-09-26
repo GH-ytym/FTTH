@@ -3,8 +3,7 @@ import copy
 
 import pytest
 
-from backend.models import RunInput
-from backend.workflow import Intent, WorkflowController
+from backend.workflow import Intent
 from test_workflow import fixture, IntentModel
 from test_service import setup_service
 

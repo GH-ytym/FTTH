@@ -1,7 +1,6 @@
 import asyncio
-import json
 from backend.progress import algorithm_step
-from test_service import setup_service
+from test_service import setup_service, use_host_python
 
 
 def test_stage_mapping():
@@ -16,6 +15,7 @@ def test_stage_mapping():
 def test_actual_stdout_emits_structured_stages(tmp_path):
     async def scenario():
         service, sid, _ = setup_service(tmp_path)
+        use_host_python(service)
         service.store.put('run', {'id':'test', 'session_id':sid, 'status':'running'})
         lines = ['[bridge] 任务四初算：建立关系', '[bridge] 任务三：优化 PM', '[bridge] 任务六：管线路由']
         script = tmp_path / 'progress_fixture.py'

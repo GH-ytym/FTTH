@@ -11,7 +11,6 @@ from task_bridge import prepare_qgis_runtime
 
 def inspect(config_path):
     from run_task1 import run
-    from task2_topology_adapter import build_task2_topology_from_sources
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     result = run(config_path, validate_only=False)
     topology = json.loads(Path(result["task2_topology_json"]).read_text(encoding="utf-8"))
@@ -26,7 +25,7 @@ def inspect(config_path):
 
 
 def main():
-    handles = prepare_qgis_runtime()
+    _handles = prepare_qgis_runtime()  # DLL handles must stay alive until exit.
     from qgis.core import QgsApplication, QgsProject
     app = QgsApplication([], False)
     app.initQgis()

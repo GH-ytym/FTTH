@@ -16,7 +16,7 @@ try:
     from Foundation import NSObject, NSKeyValueObservingOptionNew, NSKeyValueChangeNewKey, NSUserDefaults
     from PyObjCTools import AppHelper
     _can_listen = True
-except ModuleNotFoundError:
+except ImportError:  # FTTH patch: also a PyObjC refused by library validation
     _can_listen = False
 
 

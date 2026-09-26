@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import logging
 import time
 from typing import Literal
 
@@ -13,6 +14,8 @@ from .models import StrictModel, RunInput, ExportInput, PolicyInput
 from .tool_inputs import ParameterOverrides
 from .model_client import build_model
 from .store import uid
+
+logger = logging.getLogger("ftth.workflow")
 
 
 class Intent(StrictModel):
@@ -94,7 +97,7 @@ class WorkflowController:
     def context(self, item):
         sid = item['session_id']
         session = self.store.get('session', sid)
-        recent = [r for r in self.store.all('run') if r['session_id'] == sid and r.get('kind') == 'planning'][-4:]
+        recent = self.store.find('run', sid, kind='planning')[-4:]
         return {'current_request': item['content'], **self.conversation(item), 'active_task': self.coordinator.context(item),
             'confirmed_policy': session.get('policy', {}), 'project': self.service.inspect(sid),
             'recent_runs': [{'id': r['id'], 'status': r['status'], 'scope': r.get('scope'), 'parameters': r.get('parameters')} for r in recent]}
@@ -176,8 +179,8 @@ class WorkflowController:
                     session = self.store.get('session', item['session_id'])
                     session['latest_workflow_id'] = w['id']
                     self.store.put('session', session)
-                    for older in self.store.all('workflow'):
-                        if older['session_id'] == item['session_id'] and older['id'] != w['id'] and older['status'] in {'waiting_choice', 'blocked'}:
+                    for older in self.store.find('workflow', item['session_id']):
+                        if older['id'] != w['id'] and older['status'] in {'waiting_choice', 'blocked'}:
                             self.publish(older, status='cancelled', detail='已被后续规划请求取代', options=[])
                 result = self.prepare(w)
             return result, result['detail']
@@ -185,7 +188,9 @@ class WorkflowController:
             self.publish(w, status='interrupted', detail='任务已中断，不会自动重放', options=[])
             raise
         except Exception as exc:
-            # Model exceptions may contain secrets. Do not store their text.
+            # Model exceptions may contain secrets. Do not store their text;
+            # the local log keeps a redacted traceback for diagnosis.
+            logger.warning('workflow %s failed', w['id'], exc_info=True)
             persisted = self.store.get('workflow', w['id'])
             if persisted.get('run_id'):
                 return persisted, '任务已提交，但后续处理未完成，请在运行页查看当前状态。'
@@ -219,10 +224,12 @@ class WorkflowController:
                 self.service.verify_snapshot(project)
             base = intent.get('base_run_id')
             if intent.get('use_latest') and not base:
-                candidates = [r for r in self.store.all('run') if r['session_id'] == sid and r.get('project_id') == w['project_id'] and r.get('kind') == 'planning']
+                candidates = self.store.find('run', sid, project_id=w['project_id'], kind='planning')
                 if not candidates:
                     raise ValueError('没有可继承的规划，请明确新建规划')
-                base = candidates[-1]['id']
+                # Creation time, not storage order: older databases moved a run
+                # to the end whenever its review progress rewrote it.
+                base = max(candidates, key=lambda r: r.get('created', 0))['id']
             if base:
                 self.service.owned_run(sid, base)
             if intent['action'] == 'export':
@@ -331,9 +338,7 @@ class WorkflowController:
             return
         child = review.get('repair', {}).get('run_id')
         if w.get('active_run_id', w.get('run_id')) != run['id']:
-            if child and child == w.get('active_run_id'):
-                return  # Repair ownership was atomically transferred before execution.
-            return
+            return  # Includes a repair child that already took ownership atomically.
         if w['status'] in {'completed', 'failed'}:
             return
         self.publish(w, status='running' if child else 'completed', review_id=review['id'], review_status=review['status'],

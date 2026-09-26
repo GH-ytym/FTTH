@@ -1,5 +1,4 @@
 """Launch a temporary loopback service with a fake model and real QGIS UI client."""
-import os
 import socket
 import subprocess
 import sys
@@ -13,6 +12,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 import uvicorn
 from backend.settings import Settings
 from backend.app import create_app
+from backend.distribution import ui_test_env
 from test_agent import FakeToolModel
 
 with tempfile.TemporaryDirectory(prefix="ftth-ui-") as directory:
@@ -30,7 +30,8 @@ with tempfile.TemporaryDirectory(prefix="ftth-ui-") as directory:
         assert server.started
         env = settings.worker_env()
         env.update(DEMO_TEST_URL=f"http://127.0.0.1:{port}", DEMO_TEST_TOKEN=settings.token)
-        result = subprocess.run([str(settings.qgis / "bin/python.exe"), str(ROOT / "scripts/conversation_ui_smoke.py")],
+        env.update(ui_test_env(directory, sys.argv))
+        result = subprocess.run([str(settings.qgis_python), str(ROOT / "scripts/conversation_ui_smoke.py")],
             env=env, cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
         print(result.stdout)
         print(result.stderr)

@@ -30,7 +30,7 @@ def main():
     write_json(template, config)
     write_json(spec_file, {"template": str(template), "output": str(output_config), "sources": {name: {"path": str(source / (name.lower() + ".csv"))} for name in ("IMB", "SITE", "PTECH", "INFRASTRUCTURE")}})
     import subprocess
-    proc = subprocess.run([str(settings.qgis / "bin/python.exe"), str(ROOT / "scripts/qgis_worker.py"), "build-config", str(spec_file)], env=settings.worker_env(), capture_output=True, text=True, encoding="utf-8")
+    proc = subprocess.run([str(settings.qgis_python), str(ROOT / "scripts/qgis_worker.py"), "build-config", str(spec_file)], env=settings.worker_env(), capture_output=True, text=True, encoding="utf-8")
     print(proc.stdout, flush=True)
     if proc.returncode:
         raise RuntimeError(proc.stderr)

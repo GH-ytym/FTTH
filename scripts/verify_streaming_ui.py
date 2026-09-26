@@ -1,6 +1,4 @@
 """Offline SSE -> real backend -> Qt HTTP client acceptance, optionally installed ZIP."""
-import json
-import os
 from pathlib import Path
 import socket
 import subprocess
@@ -13,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 import uvicorn
 from backend.app import create_app
+from backend.distribution import install, ui_test_env
 from backend.settings import Settings
 from test_streaming import streaming_model
 
@@ -31,10 +30,15 @@ with tempfile.TemporaryDirectory(prefix="ftth-stream-ui-") as directory:
             time.sleep(.02)
         assert server.started
         env = settings.worker_env()
-        env.update(DEMO_TEST_URL=f"http://127.0.0.1:{sock.getsockname()[1]}", DEMO_TEST_TOKEN=settings.token, PYTHONFAULTHANDLER="1")
-        if "--installed" in sys.argv:
-            env["DEMO_TEST_INSTALLED"] = "1"
-        result = subprocess.run([str(settings.qgis / "bin/python.exe"), "-u", str(ROOT / "scripts/streaming_ui_smoke.py")],
+        url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        env.update(DEMO_TEST_URL=url, DEMO_TEST_TOKEN=settings.token, PYTHONFAULTHANDLER="1")
+        env.update(ui_test_env(directory, sys.argv))
+        if "--fresh-install" in sys.argv:
+            # Exactly what `ftth plugin install` does, into a throwaway profile.
+            target, _ = install(profiles=Path(directory) / "profiles", backups=Path(directory) / "backups",
+                connection={"url": url, "token_path": str(settings.data / "connection.token")})
+            env.update(DEMO_TEST_PLUGINS=str(target.parent), DEMO_TEST_EXPECT_AUTOCONNECT="1")
+        result = subprocess.run([str(settings.qgis_python), "-u", str(ROOT / "scripts/streaming_ui_smoke.py")],
             env=env, cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
         print(result.stdout)
         print(result.stderr)

@@ -11,7 +11,7 @@ handles = prepare_qgis_runtime()
 from qgis.core import QgsApplication
 app = QgsApplication([], True)
 app.initQgis()
-from ftth_demo0.panel import Panel
+from ftth_demo0.panel import Panel, TOOL_LABELS
 from ftth_demo0.fluent_ui import MarkdownView
 p = Panel(None)
 p.url.setText(os.environ["DEMO_TEST_URL"])
@@ -50,7 +50,9 @@ assert p.transcript.activities
 activity = next(iter(p.transcript.activities.values()))
 activity["toggle"].click()
 wait_for(lambda: activity["detail"].isVisible())
-assert "inspect_project" in activity["detail"].text()
+# The panel shows business labels, not internal tool names.
+assert TOOL_LABELS["inspect_project"] + " · " in activity["detail"].text()
+assert "inspect_project" not in activity["detail"].text()
 p.home()
 p.message.setText("新的规划问题")
 p.send()
