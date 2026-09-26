@@ -100,3 +100,27 @@
 - `verify_review_ui.py --workflow-ui` 和 `verify_streaming_ui.py` 通过。真实 QGIS Qt 验证无执行模式的发送、持久化偏好、历史恢复、选择卡片、重复点击及 480px 布局；已查看 `runtime/release-0.5.0/rerun-preferences.png` 和 `workflow-submitted.png`。
 - `verify_reviews.py --workflow` 通过：真实 51 IMB 数据完成规划、独立审查和导出，规划与导出均从不含 `allow_actions` 的聊天消息提交。记录：`runtime/release-0.6.0/e2e-61972dd9/acceptance.json`。
 - 上述模型环节使用脚本模型，验证工作流和授权边界，不作为自然语言识别准确率证明。当前终端没有真实模型配置；在线模型验证仍可在配置后运行 `verify_reviews.py --workflow --real-model`。
+
+### 2026-09-26 上下文与主任务协调改造
+
+- 完整回归：155 通过、1 跳过（Windows 链接权限）。新增覆盖现场四轮对话、澄清绕过模型 checkpoint 的旧历史、旧工具轨迹隔离、目标修订、只读限制、切换话题、晚到审查、重算归属原子提交及失败回滚、取消、重启、历史分页隔离、保护澄清链及消息更新不改变轮次顺序。
+- `verify_review_ui.py --workflow-ui` 和 `verify_streaming_ui.py` 通过真实 QGIS Qt/SSE 验证；问答与澄清不再留下执行卡片。命令使用 `python -X utf8`，避免 PowerShell 默认 GBK 无法输出第三方组件提示中的 emoji。
+- `verify_reviews.py --workflow` 通过真实 51 IMB 规划与导出，并核对两个主任务、算法/导出/审查 worker 的父任务及版本。记录：`runtime/release-0.6.0/e2e-918603cb/acceptance.json`。模型为脚本模型。
+- `verify_conversation.py --real-model` 已提供隔离真实模型验收入口；当前终端无模型配置，预检退出，未宣称在线模型语义验收通过。
+- 健康检查新增 `context_protocol=task-v1`，插件能提示旧后端需要重启。源码调研、固定提交与方案依据见 `audit/CONTEXT_ORCHESTRATION_RESEARCH-20260926.md`。
+- 已重新打包并安装到 QGIS default profile，168 个文件哈希与源码一致；`verify_review_ui.py --workflow-ui --installed` 通过。原插件备份：`runtime/plugin-backups/ftth_demo0-20260926-144454`。用户正在运行的后端和 QGIS 未自动重启。
+
+### 2026-09-26 真实 UI 语义复现与源码依据
+
+- 使用 Windows computer-use 实际向 QGIS 侧栏发送两轮问题，在线模型复现：无法读取距离计算实现、从未报错推断无法判断多 NRO 支持。原文保存在 `runtime/grounding-ui-before.json`。本轮未提交规划、导出或数据修改。
+- 修复加入按主题读取源码证据的工具、预检与可行性区分、完整规划一个 NRO 的能力说明，以及待澄清问题清除猜测参数的规则。
+- 完整回归 160 通过、1 跳过；新增 `tests/test_grounding.py` 验证上述接口契约与实际 LangChain 工具分派。真实模型修复后的验收待后端重启后完成，不能由脚本模型代替。
+- 调研与实现记录：`audit/GROUNDING_UI_RESEARCH-20260926.md`。
+
+### 2026-09-26 二次语义修正与 benchmark
+
+- 已完成非阻塞question字段误触发澄清、ZNRO/ZPM混淆及15%分支范围说明的修正。完整回归 **167通过、1跳过**。
+- 新增12场景15轮的 `benchmarks/dialogue_v1.json`，现有路由+ReAct与只读ReAct消融均跑通离线smoke。脚本模型故意错分动作，路由评分确实捕获失败；所有语义评分保持未审核，没有把结构通过计为回答正确。
+- 评测器测试覆盖副作用拦截、无项目场景、实际工具轨迹、执行正样本的只读消融跳过、数据集/轮次一致性以及未完成语义审核不计算通过率。报告记录后端源码摘要、模型公开配置、依赖版本及耗时。
+- 真实benchmark预检因当前终端没有模型配置退出；尚无两架构的真实效果或成本优劣结论。命令、逐轮审核标准与对比方法见 `benchmarks/README.md`。
+- 已重新打包。上述最后两处后端修正仍需重启后端加载，QGIS插件本轮没有新增改动；修复后在线语义验收仍待完成。

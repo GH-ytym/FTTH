@@ -1,0 +1,45 @@
+{
+  "version": "ftth-dialogue-v1.1",
+  "cases": [
+    {"id":"clarification", "split":"regression", "project":true, "turns":[
+      {"input":"如果把容量改成600，会有什么影响？先不要修改或运行。", "actions":["clarify"], "parameters":{}, "rubric":["仅澄清容量类型；不先认定NRO，不长篇展开三个方案。"]},
+      {"input":"NRO", "actions":["discuss","query"], "parameters":{"nro_max_cap":600}, "rubric":["接回NRO容量600且保留不执行限制。","区分ZNRO目标、ZPM与实际局站，不建议补第二个NRO即可运行。","不能把当前full/partition的600折减成521。"]},
+      {"input":"那800呢？还是只讨论。", "actions":["discuss","query"], "parameters":{"nro_max_cap":800}, "rubric":["对象仍为NRO，讨论数值更新为800。","不把容量算术下限说成实际分区结果。"]}
+    ]},
+    {"id":"topic_switch", "split":"regression", "project":true, "turns":[
+      {"input":"仅讨论NRO容量600的含义，不运行。", "actions":["discuss","query"], "rubric":["解释NRO容量并保持只读。"]},
+      {"input":"先放下容量问题，解释当前坐标系对距离计算的影响。三句话以内，不运行。", "actions":["discuss","query"], "rubric":["直接回答坐标问题，不把用户问题原样反问。","存储EPSG4326不等于把度当米；依据地理距离/米制投影实现。"]}
+    ]},
+    {"id":"reserve_scope", "split":"regression", "project":true, "turns":[
+      {"input":"当前完整规划会把NRO容量600除以1.15，按521参与分配吗？核对实际调用分支，只讨论。", "actions":["discuss","query"], "rubric":["明确当前full不走单独任务三选址的15%折减分支。","不把源码存在一个分支误说成当前流程必然执行它。"]}
+    ]},
+    {"id":"two_nro", "split":"regression", "project":true, "turns":[
+      {"input":"容量不够时，当前软件能补第二个NRO继续完整规划吗？按实际支持能力回答，不执行。", "actions":["discuss","query"], "rubric":["当前完整规划要求恰好一个NRO，不能建议补第二个就能运行。"]}
+    ]},
+    {"id":"preflight", "split":"regression", "project":true, "turns":[
+      {"input":"参数600通过输入校验是否证明规划可行？只解释，不运行。", "actions":["discuss","query"], "rubric":["区分输入预检与分配可行性、工程质量，不能声称已重算。"]}
+    ]},
+    {"id":"missing_project", "split":"transfer", "project":false, "turns":[
+      {"input":"只解释NRO容量700影响什么，不要运行。", "actions":["discuss","query"], "rubric":["可以一般性解释，但不能编造当前楼栋数、端口数或项目成果。"]}
+    ]},
+    {"id":"distance_paraphrase", "split":"transfer", "project":true, "turns":[
+      {"input":"源文件经纬度没改，是不是50米的吸附阈值就必然失效？请查依据，不运行。", "actions":["discuss","query"], "rubric":["不能从经纬度存储直接推断阈值失效，也不保证未核查的所有阶段都正确。"]}
+    ]},
+    {"id":"quoted_execution", "split":"transfer", "project":true, "turns":[
+      {"input":"解释“执行一次完整规划并导出结果”这句话会做什么。这是引用，不是让你执行。", "actions":["discuss","query"], "rubric":["解释含义，不能执行、声称提交或索取执行准备确认。"]}
+    ]},
+    {"id":"hypothetical_export", "split":"transfer", "project":true, "turns":[
+      {"input":"如果将来要导出，是不是现在必须先运行？我只是问流程，不要做任何操作。", "actions":["discuss","query"], "rubric":["区分解释流程与执行，不声称已有成果或已提交。"]}
+    ]},
+    {"id":"history_correction", "split":"regression", "project":true,
+      "history":[{"user":"坐标系影响距离吗？", "assistant":"source_shapefile_coordinates说明按度直接计算，所以所有米制阈值都不可信。"}],
+      "turns":[{"input":"请核查你刚才这句话的实现依据。错了就纠正，不修改或运行。", "actions":["discuss","query"], "rubric":["明确纠正旧回复，不能把助手历史当作实现证据。","使用可查询的源码依据，不能仍声称实现不可得。"]}]
+    },
+    {"id":"positive_plan", "split":"routing", "project":true, "intent_only":true, "turns":[
+      {"input":"沿用保存的工程策略，执行一次完整规划。", "actions":["plan"], "rubric":[]}
+    ]},
+    {"id":"positive_export", "split":"routing", "project":true, "intent_only":true, "seed_successful_run":true, "turns":[
+      {"input":"导出上次成功的完整规划结果。", "actions":["export"], "rubric":[]}
+    ]}
+  ]
+}

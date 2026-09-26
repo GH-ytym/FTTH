@@ -12,6 +12,8 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
+junit.xml
 
 # Local data, conversations, checkpoints, snapshots and results
 /runtime/
@@ -20,11 +22,18 @@ htmlcov/
 /outputs/
 /exports/
 /local/
+# Benchmark fixtures and scripts are tracked; generated run reports are local.
+/benchmarks/results/
+/benchmarks/reports/
+/benchmarks/routed*.json
+/benchmarks/react*.json
 *.sqlite
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
 *.db-journal
+*.db-wal
+*.db-shm
 *.log
 *.pid
 connection.token

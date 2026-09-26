@@ -138,6 +138,19 @@ def main():
             assert export.status_code == 202, export.text
             export_id = export.json()['id']
         delivery = wait_run(export_id)
+        if args.workflow:
+            history = client.get(f'/sessions/{sid}/history').json()
+            tasks = {t['id']: t for t in history['tasks']}
+            workers = history['workers']
+            assert len(tasks) == 2, tasks
+            for completed in (run, delivery):
+                snapshot = completed['task_context']
+                assert snapshot['id'] in tasks and snapshot['mode'] == 'execute', snapshot
+                assert any(w['task_id'] == snapshot['id'] and w['task_revision'] == snapshot['revision']
+                    and w['run_id'] == completed['id'] and w['status'] == 'succeeded' for w in workers), workers
+            assert any(w['actor'] == 'reviewer' and w['run_id'] == rid and w['status'] == 'completed' for w in workers), workers
+            receipt['task_ids'] = list(tasks)
+            receipt['workers'] = workers
         receipt.update(session_id=sid, run_id=rid, planning_status=run["status"], review_id=review["id"],
             review_status=review["status"], verdict=review["result"]["verdict"], evidence=review["evidence"],
             export_status=delivery["status"], export_id=delivery["id"], metrics=run.get("metrics"),

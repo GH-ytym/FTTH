@@ -16,6 +16,7 @@ from .progress import algorithm_step
 from .instance_lock import DataDirectoryLock
 from .models import PolicyInput
 from .titles import valid_title, fallback_title
+from .coordinator import TaskCoordinator
 
 
 def read_json(path):
@@ -67,6 +68,8 @@ class Service:
         self.on_review = None
         self.closing = False
         self.workflows = None
+        self.coordinator = TaskCoordinator(store)
+        self.coordinator.recover()
         for workflow in store.all('workflow'):
             if workflow['status'] not in {'completed', 'cancelled', 'failed', 'interrupted', 'waiting_choice', 'blocked'}:
                 workflow.update(status='interrupted', detail='服务已重启，任务不会自动重放', options=[])
@@ -141,6 +144,11 @@ class Service:
             auth.get('request_content') != message.get('content') or not quote.strip() or
             quote not in message.get('content', '') or quote != intent.get('evidence_quote')):
             raise ValueError('本次操作缺少有效的本轮用户请求授权')
+        if workflow.get('task_id'):
+            task = self.store.get('task', workflow['task_id'])
+            if (task['revision'] != workflow.get('task_revision') or task['mode'] != 'execute' or
+                task['current_message_id'] != message_id or task['status'] in {'cancelled', 'superseded', 'interrupted'}):
+                raise ValueError('任务目标已变化或仅允许讨论，不能使用旧任务执行授权')
         for name in PolicyInput.model_fields:
             if parameters and parameters.get(name) and not session.get("policy", {}).get(name):
                 raise ValueError("尚未确认工程策略：" + name + "。请在数据页勾选并保存本会话策略；模型不能代替用户确认。")
@@ -239,6 +247,7 @@ class Service:
                 raise ValueError("输入快照已改变，请重新登记数据：" + relative)
 
     def validate(self, session_id, request):
+        from .knowledge import FULL_NRO_COUNT, capabilities
         project, scope, p = self.resolve(session_id, request)
         summary = project["summary"]
         errors = []
@@ -247,7 +256,7 @@ class Service:
         if p["spatial_weight"] == p["pipe_weight"] == 0:
             errors.append("空间权重和管线权重不能同时为零")
         if scope == "full":
-            if summary["nro_count"] != 1:
+            if summary["nro_count"] != FULL_NRO_COUNT:
                 errors.append(f"完整规划需要且只能有一个 NRO，当前 {summary['nro_count']} 个")
             if not (p["use_formal_infrastructure"] and summary["infrastructure_count"] or p["use_recognition_roads"] and project["recognition_path"]):
                 errors.append("需选择有实际数据的正式基础设施或识别道路作为路由来源")
@@ -256,6 +265,7 @@ class Service:
         if p["use_recognition_roads"] and not project["recognition_path"]:
             errors.append("未登记识别结果 GPKG")
         return {"valid": not errors, "errors": errors, "scope": scope, "parameters": p,
+                "check_level": "input_preflight", "feasibility_checked": False, "capabilities": capabilities(),
                 "warnings": ["当前算法的最终导出要求恰好两个 PM 分区；实际限制以执行报告为准。"]}
 
     def submit(self, session_id, request, *, agent_message_id=None):
@@ -297,12 +307,17 @@ class Service:
             if message.get('workflow_id'):
                 workflow = self.store.get('workflow', message['workflow_id'])
                 run['workflow_id'] = workflow['id']
+                run['task_context'] = copy.deepcopy(workflow.get('task_context'))
                 workflow.update(status='submitted', run_id=run['id'], detail='规划已提交，等待后台计算。', options=[])
                 objects.append(('workflow', workflow))
             digest = hashlib.sha256(json.dumps({'scope': scope, 'parameters': p, 'base': request.base_run_id}, sort_keys=True).encode()).hexdigest()
             run, created = self.store.commit_action(session_id, message.get('workflow_id') or agent_message_id or request.request_id,
                 'planning', digest, run, objects, 'run:' + request.request_id)
         if created:
+            if run.get('workflow_id'):
+                workflow = self.store.get('workflow', run['workflow_id'])
+                self.coordinator.worker('algorithm', run, workflow)
+                self.coordinator.sync_workflow(workflow)
             self.spawn(self.execute(run["id"]))
         return run
 
@@ -360,9 +375,18 @@ class Service:
                 "repair_review_id": review_id, "repair_parameter_patch": patch,
                 "repair_count": 1, "allow_auto_repair": False, "authorization": root["authorization"], "created": time.time()}
             root.update(repair_count=1, repair_child_id=child["id"])
+            repair_objects = [("run", root), ("run", child)]
             if root.get('workflow_id'):
                 child['workflow_id'] = root['workflow_id']
-            self.store.publish_objects([("run", root), ("run", child)], root["session_id"], "run", run_id=child["id"], status="queued")
+                child['task_context'] = copy.deepcopy(root.get('task_context'))
+                workflow = self.store.get('workflow', root['workflow_id'])
+                workflow.update(active_run_id=child['id'], repair_run_id=child['id'], status='running')
+                repair_objects.append(('workflow', workflow))
+            self.store.publish_objects(repair_objects, root["session_id"], "run", run_id=child["id"], status="queued")
+            if root.get('workflow_id'):
+                self.store.event(root['session_id'], 'workflow', workflow=workflow)
+                self.coordinator.worker('algorithm', child, workflow)
+                self.coordinator.sync_workflow(workflow)
         self.spawn(self.execute(child["id"]))
         return child
 
@@ -447,6 +471,7 @@ class Service:
                 if workflow['status'] in {'cancelled', 'interrupted'} or session.get('policy_version', 0) != run['authorization']['policy_version']:
                     run.update(status='cancelled', error='工作流已取消或策略版本已变化')
                     self.store.put('run', run)
+                    self.coordinator.worker('algorithm' if run['kind'] == 'planning' else 'exporter', run, workflow)
                     if self.workflows:
                         self.workflows.publish(workflow, status='cancelled', detail=run['error'], options=[])
                     return
@@ -555,6 +580,9 @@ class Service:
                 if target["status"] in ("queued", "running"):
                     target["status"] = "cancelled"
                 self.store.publish_objects([("run", target)], session_id, "run", run_id=target["id"], status=target["status"])
+                if target.get('workflow_id'):
+                    workflow = self.store.get('workflow', target['workflow_id'])
+                    self.coordinator.worker('algorithm' if target['kind'] == 'planning' else 'exporter', target, workflow)
         for target in targets:
             if target["id"] in self.processes:
                 await self.kill(self.processes[target["id"]])
@@ -614,11 +642,16 @@ class Service:
         if message.get('workflow_id'):
             w = self.store.get('workflow', message['workflow_id'])
             run['workflow_id'] = w['id']
+            run['task_context'] = copy.deepcopy(w.get('task_context'))
             run['authorization'] = {'policy_version': self.store.get('session', session_id).get('policy_version', 0)}
             w.update(status='submitted', run_id=run['id'], detail='导出任务已提交', options=[])
             objects.append(('workflow', w))
         run, created = self.store.commit_action(session_id, message.get('workflow_id') or agent_message_id or request.request_id,
             'export', request.run_id, run, objects, 'export:' + request.request_id)
         if created:
+            if run.get('workflow_id'):
+                w = self.store.get('workflow', run['workflow_id'])
+                self.coordinator.worker('exporter', run, w)
+                self.coordinator.sync_workflow(w)
             self.spawn(self.execute(run["id"]))
         return run

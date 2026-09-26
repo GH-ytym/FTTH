@@ -71,6 +71,23 @@ app.processEvents()
 assert p.auto_repair.isVisible() and p.minimumSizeHint().width() <= 480
 p.grab().save(str(out / "rerun-preferences.png"))
 p.tabs.setCurrentIndex(0)
+# A pure question/clarification is a normal chat reply, not an executable job.
+# Exercise stale cards from older UI events as well as the new interpreting state.
+for action in ('query', 'discuss', 'clarify'):
+    wid, message_id = 'context-' + action, 'context-message-' + action
+    flow = {'id': wid, 'message_id': message_id, 'session_id': sid, 'status': 'interpreting', 'updated': 1}
+    p.workflow_event(flow)
+    assert wid not in p.transcript.workflow_cards and 'intro_' + wid not in p.transcript.replies
+    p.transcript.workflow_card(flow, lambda _: None, lambda: None)
+    assert wid in p.transcript.workflow_cards
+    flow.update(status='blocked' if action == 'clarify' else 'completed', updated=2,
+        intent={'action': action}, detail='这里的容量是指 NRO 还是 ZPM？')
+    p.workflow_event(flow)
+    assert wid not in p.transcript.workflow_cards
+    assert message_id not in p.transcript.workflow_messages
+    assert 'intro_' + wid not in p.transcript.replies
+    if action == 'clarify':
+        assert p.transcript.replies[message_id].current_text == flow['detail']
 # Exercise live actor icons and animation without waiting on a real provider.
 p.transcript.activity("live-main", "校验输入")
 p.review_event({"review_id": "live-review", "status": "running", "summary": {"stage": "read_evidence", "active_evidence_ids": ["task6"]}})

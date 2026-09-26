@@ -205,16 +205,19 @@ class Conversation(ScrollArea):
                 widget.deleteLater()
         self.empty.show()
 
+    def clear_workflow_card(self, key):
+        old = self.workflow_cards.pop(key, None)
+        if old:
+            self.items.removeWidget(old)
+            old.hide()
+            old.deleteLater()
+
     def workflow_card(self, workflow, choose, cancel):
         self.empty.hide()
         bar = self.verticalScrollBar()
         at_bottom = bar.maximum() - bar.value() < 60
         key = workflow['id']
-        if key in self.workflow_cards:
-            old = self.workflow_cards.pop(key)
-            self.items.removeWidget(old)
-            old.hide()
-            old.deleteLater()
+        self.clear_workflow_card(key)
         if workflow['status'] in {'completed', 'cancelled', 'failed', 'interrupted'}:
             return
         card = QWidget(self.body)

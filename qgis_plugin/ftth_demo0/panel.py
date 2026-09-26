@@ -382,8 +382,12 @@ class Panel(QWidget):
         self.transcript.workflow_versions[wid] = stamp
         mid = workflow['message_id']
         action = (workflow.get('intent') or {}).get('action')
-        if action in {'query', 'discuss'}:
+        if workflow['status'] == 'interpreting':
+            self.transcript.activity(mid, '理解本轮请求', 'running', role='main', resume=True)
+            return
+        if action in {'query', 'discuss', 'clarify'}:
             self.transcript.workflow_messages.discard(mid)
+            self.transcript.clear_workflow_card(wid)
             intro = self.transcript.replies.pop('intro_' + wid, None)
             if intro:
                 intro.hide()
@@ -392,6 +396,9 @@ class Panel(QWidget):
             reply = self.transcript.replies.get(mid)
             if reply:
                 reply.show()
+            if action == 'clarify':
+                self.transcript.reply(mid, workflow.get('detail') or '请补充具体需求。', 'succeeded')
+                self.transcript.activity(mid, '等待补充信息', 'succeeded', role='main', resume=True)
             return
         self.transcript.workflow_messages.add(mid)
         existing = self.transcript.replies.get(mid)
@@ -502,9 +509,9 @@ class Panel(QWidget):
         if self.token.text() and time.monotonic() - self.last_health_check > 10:
             self.last_health_check = time.monotonic()
             def health(value):
-                self.backend_compatible = value.get("execution_authority") == "user_request"
+                self.backend_compatible = value.get("execution_authority") == "user_request" and value.get("context_protocol") == "task-v1"
                 if not self.backend_compatible:
-                    self.status.setText("后端尚不支持自然语言执行授权：停止旧后端，再在原终端运行 scripts/start_qwen.ps1")
+                    self.status.setText("后端需要更新上下文协调逻辑：停止旧后端，再在原终端运行 scripts/start_qwen.ps1")
             self.api("GET", "/health", callback=health, quiet=True)
         if self.token.text() and time.monotonic() - self.last_sessions_refresh > 5:
             self.last_sessions_refresh = time.monotonic()

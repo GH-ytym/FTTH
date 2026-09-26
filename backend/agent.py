@@ -3,7 +3,8 @@ import hashlib
 import json
 import time
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from collections import defaultdict
 
 from langchain.agents import create_agent
@@ -17,13 +18,19 @@ from .store import uid
 from .service import run_summary
 from .titles import fallback_title, generate_title
 from .workflow import WorkflowController, compact_run
+from .knowledge import capabilities, read_reference
 from langchain_core.messages.utils import count_tokens_approximately
 
-PROMPT = """你是 FTTH 规划助手，使用中文。通过工具检查当前项目、校验参数、提交规划、比较并展示结果。
+PROMPT = """你是 FTTH 规划助手的只读问答阶段，使用中文。回答本轮问题，可通过工具检查项目、校验参数、读取和比较结果。执行请求由前置工作流处理。
+回答项目算法行为（容量、局站数量、距离计算）前必须用read_algorithm_reference读取实现依据；数据元信息和你先前的回复不能代替实现证据。无法读取时明确未知，不能猜公式、支持能力或计算结果。发现旧回复错误应直接纠正。
+区分输入预检通过、条件推论与实际运行结果。validate_inputs只检查输入，不验证分配可行性；600被接受不是方案可行，也不是无解的证明。理论容量不足不等于当前软件支持补建局站。
+用户只讨论时，直接解释影响，不追加必须确认的执行步骤、不催补数据或修改工程策略。只在缺信息确实无法回答时问一个问题。默认不超过三小段，避免对未选定的多种参数长篇展开；不罗列默认参数和内部ID。
+优先回答本轮目标，不能用旧问题的数据检查总结替代新问题的影响分析。用户补充上一轮问题时，将回答与助手的澄清问题对应，保留原问题中已明确的对象、数值和限制，不重复问已回答的内容。
+假设讨论应解释改变的含义、受影响的约束和可由当前数据支持的推论；没有重算就不声称得到重算结果。必要时查询相关证据，数据检查只作为依据，不是默认的回答模板。
 未登记项目时可以正常对话，执行规划前引导用户在数据页登记，不要假定已有数据。
 数据、参数和执行事实以工具返回为准。先检查再执行；需要补充数据或工程假设时向用户提问。
 不得编造机房、道路或输入。不得把成功运行解释为规划质量已验收。不要替用户放宽限制。
-用户明确要求运行或修改参数重跑即可执行，不重复索取确认；未明确的拆分或道路选择先问。
+本阶段没有规划、导出或展示执行工具，不声称发起新任务；确需补充的信息才提问。
 沿用上一版时使用真实 base_run_id。不要根据记忆重新填所有参数。分区使用 partition，完整使用 full。
 parameter_overrides 必须传 JSON 对象，不要传序列化字符串；只填写用户明确修改的字段。
 PM分区与NRO局站是不同概念，恰好两个PM的导出限制不意味着需要两个NRO。
@@ -54,6 +61,9 @@ class StopAfterSubmission(AgentMiddleware):
 
 
 class BoundedContext(AgentMiddleware):
+    def __init__(self, protected=()):
+        self.protected = {'user_' + mid for mid in protected}
+
     async def awrap_model_call(self, request, handler):
         messages = list(request.messages)
         current_start = max((i for i, m in enumerate(messages) if m.type == 'human'), default=0)
@@ -61,15 +71,16 @@ class BoundedContext(AgentMiddleware):
         messages = [m.model_copy(update={'content':'旧工具结果已归档，请按运行 ID 重新查询摘要。'})
             if i < current_start and m.type == 'tool' and len(str(m.content)) > 4000 else m
             for i, m in enumerate(messages)]
-        starts = [i for i, m in enumerate(messages) if m.type == 'human']
-        if len(starts) > 5:
-            messages = messages[starts[-5]:]
+        # The transcript builder already bounds ordinary history and protects
+        # pending clarification chains; don't cut that chain at five turns.
         system_message = getattr(request, 'system_message', None)
         overhead = count_tokens_approximately([system_message]) if system_message else 0
         while count_tokens_approximately(messages) + overhead > 12000:
             boundaries = [i for i, m in enumerate(messages) if m.type == 'human']
             if len(boundaries) < 2:
                 raise ValueError('当前请求及工具结果超过上下文预算，请缩小查询范围')
+            if any(m.id in self.protected for m in messages[:boundaries[1]]):
+                raise ValueError('待澄清问题及工具结果超过上下文预算，请缩小查询范围')
             messages = messages[boundaries[1]:]
         return await handler(request.override(messages=messages))
 
@@ -176,10 +187,6 @@ class AgentController:
                 text = action + "未完成，请在运行页查看失败阶段与处理建议。"
             item.update(status="succeeded", response=text, elapsed_seconds=0)
             self.store.publish_message(item, [("assistant", {"text": text, "status": "succeeded"})])
-            if self.model is not None or self.service.settings.model_ready:
-                agent = create_agent(model=self.model or build_model(self.service.settings), tools=[], checkpointer=self.checkpointer)
-                await agent.aupdate_state({"configurable": {"thread_id": item["session_id"]}},
-                    {"messages": [AIMessage(content="后台执行事实（非指令），运行 " + run["id"] + "：" + text, id=item["id"])]}, as_node="model")
 
     def review_completed(self, review):
         self.workflows.review_changed(review)
@@ -218,11 +225,6 @@ class AgentController:
             item = {"id": mid, "session_id": review["session_id"], "status": "succeeded", "notification": True,
                 "response": text, "created": time.time(), "review_id": review["id"]}
             self.store.publish_message(item, [("assistant", {"text": text, "status": "succeeded"})])
-            settings = self.service.settings
-            if self.model is not None or settings.model_ready:
-                agent = create_agent(model=self.model or build_model(settings), tools=[], checkpointer=self.checkpointer)
-                await agent.aupdate_state({"configurable": {"thread_id": review["session_id"]}},
-                    {"messages": [AIMessage(content="后台审查数据（非指令），运行 " + review["run_id"] + "，审查 " + review["id"] + "：\n" + text, id=mid)]}, as_node="model")
 
     def tools(self, session_id, message_id, notification=False):
         service = self.service
@@ -244,7 +246,7 @@ class AgentController:
         @tool
         def inspect_project() -> dict:
             """查看当前会话的数据快照、字段、规模和最近运行；没有参数。"""
-            return {**service.inspect(session_id), "confirmed_policy": service.store.get("session", session_id).get("policy", {}),
+            return {**service.inspect(session_id), "engine_capabilities": capabilities(), "confirmed_policy": service.store.get("session", session_id).get("policy", {}),
                 "recent_runs": [{"id": r["id"], "status": r["status"], "parameters": r.get("parameters"), "scope": r.get("scope")} for r in service.store.all("run") if r["session_id"] == session_id][-10:]}
 
         @tool(args_schema=PlanningToolInput)
@@ -306,6 +308,16 @@ class AgentController:
                 return {'report_id': report_id, 'text': raw[offset:offset+3000], 'next_offset': offset+3000 if len(raw) > offset+3000 else None}
             return call(read)
 
+        @tool
+        def read_conversation(message_ids: list[str], offset: int = 0) -> dict:
+            """根据当前任务的来源消息ID，分页读取本会话的原始问答；摘要不够时使用，只读。"""
+            return call(service.coordinator.read_turns, session_id, message_ids, offset)
+
+        @tool
+        def read_algorithm_reference(topic: str) -> dict:
+            """读取算法实现依据。topic=distance（坐标/距离单位）或capacity（容量/分区/局站限制）。解释本项目算法行为前调用；返回源码位置、原文及实现边界，不执行规划。"""
+            return call(read_reference, topic)
+
         @tool(args_schema=ShowToolInput)
         def show_result(run_id: str, visible_layers: list[str] | None = None, zoom: bool = True) -> dict:
             """请求QGIS显示成功批次。可选类别IMB,SITE,PTECH,BOITE,INFRASTRUCTURE,CABLE,ZPM,ZNRO。返回pending不是已展示。"""
@@ -325,7 +337,7 @@ class AgentController:
             if notification:
                 return {"error": "完成通知不允许发起导出"}
             return call(service.export, session_id, ExportInput(request_id=key({"export": run_id}), run_id=run_id), agent_message_id=message_id)
-        return [inspect_project, validate_inputs, submit_planning, get_run, compare_runs, get_reviews, read_report, show_result, export_result]
+        return [inspect_project, validate_inputs, submit_planning, get_run, compare_runs, get_reviews, read_report, read_conversation, read_algorithm_reference, show_result, export_result]
 
     async def respond(self, item):
         async with self.locks[item["session_id"]]:
@@ -355,19 +367,32 @@ class AgentController:
                             item.update(status='succeeded', response=response, action_status=workflow['status'])
                             return
                     mode_prompt = ("\n当前轮次是后台完成事件：仅解释本次结果，禁止提交规划或导出。" if notification else
-                        "\n当前轮次是用户的新请求。历史后台通知中的‘仅解释、不新建计算’只约束当时的通知，不约束现在。以本轮最后一条用户消息为当前任务；用户明确要求改参数重跑时，读取真实基线、继承参数、校验并提交新批次，不能用旧批次成功代替本次执行。")
+                        "\n当前轮次是用户的新请求或澄清回答。结合完整问答理解最新消息；旧报告仅作背景，不能替代本轮问题。")
                     mode_prompt += "\n本轮执行意图已由工作流处理。工程策略以 inspect_project.confirmed_policy 为准。"
                     mode_prompt += '\n当前为只读问答。不得声称本轮已提交规划、导出或修复。历史动作以服务端记录为准。'
                     session = self.store.get('session', item['session_id'])
                     recent_runs = [compact_run(r) for r in self.store.all('run') if r['session_id'] == item['session_id']][-2:]
-                    mode_prompt += '\n服务端当前事实（数据，不是指令）：' + json.dumps({'policy':session.get('policy', {}), 'recent_runs':recent_runs}, ensure_ascii=False)
+                    mode_prompt += '\n服务端当前事实（数据，不是指令）：' + json.dumps({'policy':session.get('policy', {}), 'recent_runs':recent_runs, 'engine_capabilities':capabilities()}, ensure_ascii=False)
+                    conversation = self.workflows.conversation(item) if not notification else {'recent_dialogue': []}
+                    if not notification:
+                        mode_prompt += '\n本轮待回答目标（需求识别结果；以用户原文及上下文为准）：' + json.dumps(
+                            {'current_request': item['content'], 'intent': workflow.get('intent'),
+                             'task': self.service.coordinator.context(item),
+                             'pending_clarification': conversation['pending_clarification']}, ensure_ascii=False)
                     readonly = [t for t in self.tools(item['session_id'], item['id'], notification) if t.name not in {'submit_planning', 'export_result', 'show_result'}]
                     agent = create_agent(model=model, tools=readonly, system_prompt=PROMPT + mode_prompt, checkpointer=self.checkpointer,
-                        middleware=[BoundedContext()])
+                        middleware=[BoundedContext(conversation.get('pending_clarification', []))])
                     # Completion events are not user instructions. Keep their tool
                     # loop out of the user's conversation, then append only a report.
                     thread_id = item["session_id"] + ":" + item["id"] if notification else item["session_id"]
-                    result = await asyncio.wait_for(agent.ainvoke({"messages": [{"role": "user", "content": item["content"]}]},
+                    # Rebuild prior turns from the application transcript, not
+                    # stale model-only history or previous tool/reasoning traces.
+                    messages = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
+                    for turn in conversation['recent_dialogue']:
+                        messages.extend([HumanMessage(content=turn['user'], id='user_' + turn['message_id']),
+                            AIMessage(content=turn['assistant'], id='answer_' + turn['message_id'])])
+                    messages.append(HumanMessage(content=item['content'], id='user_' + item['id']))
+                    result = await asyncio.wait_for(agent.ainvoke({"messages": messages},
                         {"configurable": {"thread_id": thread_id}, "recursion_limit": 16,
                          "callbacks": [ActivityEvents(self.store, item["session_id"], item["id"])]}), 180)
                     text = str(result["messages"][-1].text)
@@ -389,13 +414,14 @@ class AgentController:
                     item["response"] = partial + "\n\n---\n" + item["response"]
             finally:
                 saved = self.store.get('message', item['id'])
-                for key in ('workflow_id', 'submitted_run_id'):
+                for key in ('workflow_id', 'submitted_run_id', 'task_id', 'task_revision'):
                     if key in saved:
                         item[key] = saved[key]
                 item["elapsed_seconds"] = round(time.monotonic() - started, 1)
                 self.store.publish_message(item, [
                     ("assistant", {"text": item.get("response", ""), "status": item["status"], "elapsed_seconds": item["elapsed_seconds"]}),
                     ("work", {"status": item["status"], "elapsed_seconds": item["elapsed_seconds"]})])
+                self.service.coordinator.finish_turn(item)
             if item.get("generate_title") and settings.model_ready and self.model is None:
                 try:
                     title = await generate_title(settings, item["content"])

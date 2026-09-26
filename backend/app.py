@@ -52,7 +52,7 @@ def create_app(settings=None, model=None, review_model=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.6.0", "execution_authority": "user_request", "model_configured": settings.model_ready, "model": settings.model,
+        return {"status": "ok", "version": "0.6.0", "execution_authority": "user_request", "context_protocol": "task-v1", "knowledge_protocol": "source-v1", "model_configured": settings.model_ready, "model": settings.model,
                 "model_api": settings.model_api, "provider": settings.provider,
                 "qgis_python_exists": (settings.qgis / "bin/python.exe").exists()}
 
@@ -91,6 +91,9 @@ def create_app(settings=None, model=None, review_model=None):
             cursor = store.db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE session=?", (sid,)).fetchone()[0]
             activity = [dict(id=row[0], **json.loads(row[1])) for row in store.db.execute("SELECT id,data FROM events WHERE session=? AND id<=? ORDER BY id", (sid, cursor))]
             return {"session": session, "messages": messages, "cursor": cursor,
+                "active_task": app.state.service.coordinator.context({'session_id': sid, 'project_id': session.get('project_id')}),
+                "tasks": [t for t in store.all('task') if t['session_id'] == sid],
+                "workers": [w for w in store.all('worker') if w['session_id'] == sid],
                 "timeline": [e for e in activity if e['type'] not in {'assistant_stream', 'progress'}],
                 "workflows": [w for w in store.all('workflow') if w['session_id'] == sid],
                 "activities": [e for e in activity if e["type"] in ("activity", "progress", "run", "algorithm", "review")]}

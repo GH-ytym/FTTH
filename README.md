@@ -261,6 +261,12 @@ dist/                       本机构建的插件包（Git 忽略）
 
 ## 停止、升级与常见问题
 
+上下文改造采用应用 SQLite 统一保存完整问答和当前任务；目标、约束、待澄清问题与任务版本独立保存。算法、导出和审查结果绑定原任务及版本，不接管新问题。源码调研和方案取舍见 [上下文与编排调研](audit/CONTEXT_ORCHESTRATION_RESEARCH-20260926.md)。升级需同时重启后端和 QGIS；仅替换插件文件不会更新已运行的后端。
+
+真实模型对话回归可在已配置模型的终端执行 `.\.venv\Scripts\python.exe -X utf8 scripts/verify_conversation.py --real-model`。脚本在隔离的合成项目重放“容量600 → NRO → 完整问题”，禁止实际计算，保存回答到 `runtime/conversation-real-model.json`，仍需人工核对语义正确性。
+
+系统性评测见 [对话 benchmark](benchmarks/README.md)：12 个场景、15 轮，支持现有路由 + ReAct 与无前置路由的只读 ReAct 对照，保存回答、工具证据、源码摘要及耗时。机器契约检查与人工语义评分分开；离线 smoke 不作为模型效果。生产问答本身已使用 LangChain 模型—工具循环，事务、幂等及异步任务状态仍由服务端管理。
+
 - **停止后端**：前台终端按 `Ctrl+C`；有 `runtime/server.pid` 的受管理后台实例可用 `scripts/stop.ps1`。
 - **端口被占用**：先停止旧后端。同一数据目录只允许一个服务实例。
 - **后端版本不匹配**：同时更新后端与插件，重启后端和 QGIS。
