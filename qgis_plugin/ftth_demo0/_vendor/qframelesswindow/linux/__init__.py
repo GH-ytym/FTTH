@@ -4,7 +4,7 @@ from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import QWidget
 
 from ..titlebar import TitleBar
-from ..utils.linux_utils import LinuxMoveResize
+from ..utils import MoveResize as LinuxMoveResize  # FTTH patch: platform-selected, may be the Qt fallback
 from .window_effect import LinuxWindowEffect
 
 

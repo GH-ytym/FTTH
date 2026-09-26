@@ -15,6 +15,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 from fastapi.testclient import TestClient
+from backend import __version__
 from backend.app import create_app
 from backend.settings import Settings
 from backend.review import review_settings
@@ -31,7 +32,7 @@ def main():
     args = parser.parse_args()
     if not args.config.is_file():
         raise SystemExit("需要本地真实数据配置；可通过 --config 指定。")
-    directory = ROOT / "runtime/release-0.6.0" / ("e2e-" + uuid.uuid4().hex[:8])
+    directory = ROOT / "runtime" / f"release-{__version__}" / ("e2e-" + uuid.uuid4().hex[:8])
     settings = Settings(directory)
     configured = review_settings(settings)
     if args.real_model:
@@ -57,7 +58,6 @@ def main():
         if args.workflow:
             client.post(f'/sessions/{sid}/policy', json={'use_formal_infrastructure':True,'use_recognition_roads':True,'split_oversized_imbs':True}).raise_for_status()
             if args.real_model:
-                import asyncio
                 cases = [('不要运行，解释现有结果。', {'query','discuss'}), ('如果以后运行完整规划，需要什么数据？', {'query','discuss'}),
                     ('“执行一次完整规划”这句话是什么意思？不要执行。', {'query','discuss'}), ('取消之前的运行。', {'cancel','clarify'})]
                 receipt['intent_cases'] = []

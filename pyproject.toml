@@ -1,9 +1,45 @@
 [project]
 name = "ftth-demo0"
-version = "0.6.0"
+version = "0.7.0"
+description = "FTTH planning agent backend for the QGIS desktop plugin"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "langchain>=1,<2", "langgraph>=1.2.12,<2", "langchain-openai>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "pydantic>=2,<3", "httpx>=0.27,<1", "pytest>=8,<10"]
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "langchain>=1,<2",
+    "langgraph>=1.2.12,<2",
+    "langchain-openai>=1,<2",
+    "langgraph-checkpoint-sqlite>=3,<4",
+    "pydantic>=2,<3",
+    "httpx>=0.27,<1",
+    "keyring>=25,<26",
+]
+
+[project.scripts]
+ftth = "backend.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.14,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests", "audit"]
+
+[tool.ruff]
+# Frozen algorithms and bundled third-party UI sources are not linted.
+# runtime/ and dist/ may hold plugin backups and packages outside a git checkout.
+extend-exclude = ["vendor", "qgis_plugin/ftth_demo0/_vendor", "runtime", "dist"]
+
+[tool.ruff.lint]
+# Correctness only (pyflakes + syntax); the project keeps its own formatting.
+select = ["F", "E9"]

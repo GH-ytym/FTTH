@@ -3,19 +3,21 @@ import sys
 import time
 from pathlib import Path
 
+from . import connection
+
 # Use QGIS's own PyQt5. Never ship or replace its Qt runtime.
 vendor = str(Path(__file__).parent / "_vendor")
 if vendor not in sys.path:
     sys.path.append(vendor)
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QTextDocument, QFont, QTextTable, QTextLength, QColor, QPalette, QIcon
+from qgis.PyQt.QtGui import QTextTable, QTextLength, QColor, QPalette, QIcon
 from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton)
-from qfluentwidgets import (PushButton, PrimaryPushButton, TransparentPushButton,
+from qfluentwidgets import (PushButton, TransparentPushButton,
     TransparentToolButton, ToolButton, setCustomStyleSheet,
     LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, DoubleSpinBox, CardWidget,
-    ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, TitleLabel, SegmentedWidget,
+    ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, SegmentedWidget,
     FluentIcon as FIF, IndeterminateProgressRing, IconWidget)
 
 
@@ -624,16 +626,17 @@ def build_ui(p, business_layers):
     area, page, layout = scroll_page()
     c, box = card(page, "连接设置", "连接本机规划服务。模型密钥由后端管理，无需填入插件。")
     box.addWidget(BodyLabel("服务地址", c))
+    # Saved choices first, then what `ftth plugin install` recorded for this machine.
+    url, token_path = connection.resolve(p.settings.value("url", ""), p.settings.value("token_path", ""))
     p.url = LineEdit(c)
-    p.url.setText("http://127.0.0.1:8765")
+    p.url.setText(url)
+    p.url.editingFinished.connect(lambda: p.settings.setValue("url", p.url.text().strip()))
     box.addWidget(p.url)
     box.addWidget(BodyLabel("本地连接令牌", c))
     p.token = LineEdit(c)
     p.token.setEchoMode(LineEdit.Password)
-    p.token.setPlaceholderText("选择 connection.token 文件")
-    token_path = Path(p.settings.value("token_path", "F:/PROJECTS/py/qgis/demo0/runtime/connection.token"))
-    if token_path.exists():
-        p.token.setText(token_path.read_text(encoding="utf-8").strip())
+    p.token.setPlaceholderText("选择 connection.token 文件（`ftth serve` 启动时会显示路径）")
+    p.token.setText(connection.read_token(token_path))
     box.addWidget(p.token)
     box.addWidget(button("选择令牌文件", p.choose_token, icon=FIF.FOLDER))
     box.addWidget(button("测试连接", lambda: p.api("GET", "/health", callback=p.report), True))

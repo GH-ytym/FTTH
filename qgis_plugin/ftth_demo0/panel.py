@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from qgis.core import QgsVectorFileWriter, QgsProject
 from .input_config_builder import build_task1_config, BUSINESS_LAYERS
 from .display import show_result
 from .fluent_ui import build_ui, button, hover_feedback
+from .connection import backend_problem
 
 TOOL_LABELS = {"model_response": "理解请求与组织回复", "inspect_project": "检查项目数据", "validate_inputs": "校验输入", "submit_planning": "提交规划", "get_run": "读取运行结果", "compare_runs": "比较方案", "get_reviews": "读取审查结果", "show_result": "展示地图", "export_result": "导出成果"}
 
@@ -39,7 +41,9 @@ class Panel(QWidget):
             if families:
                 self.setFont(QFont(families[0], 9))
         self.iface = iface
-        self.settings = QSettings("FTTH", "demo0")
+        # Verification runs use a throwaway file, never the user's saved preferences.
+        isolated = os.environ.get("FTTH_PLUGIN_SETTINGS")
+        self.settings = QSettings(isolated, QSettings.IniFormat) if isolated else QSettings("FTTH", "demo0")
         self.session = ""
         self.view_generation = 0
         self.project_id = None
@@ -48,6 +52,8 @@ class Panel(QWidget):
         self.last_sessions_refresh = 0
         self.last_health_check = 0
         self.backend_compatible = None
+        self.backend_problem = ""
+        self.run_entries = None
         self.sessions_cache = []
         self.show_all_sessions = False
         self.loading_history = False
@@ -65,6 +71,7 @@ class Panel(QWidget):
 
     def home(self):
         self.view_generation += 1
+        self.run_entries = None
         self.loading_history = False
         self.session = ""
         self.session_project = None
@@ -112,6 +119,7 @@ class Panel(QWidget):
 
     def open_session(self, session):
         self.view_generation += 1
+        self.run_entries = None
         generation = self.view_generation
         self.session = session["id"]
         self.session_project = session.get("project_id")
@@ -511,7 +519,15 @@ class Panel(QWidget):
             def health(value):
                 self.backend_compatible = value.get("execution_authority") == "user_request" and value.get("context_protocol") == "task-v1"
                 if not self.backend_compatible:
-                    self.status.setText("后端需要更新上下文协调逻辑：停止旧后端，再在原终端运行 scripts/start_qwen.ps1")
+                    self.status.setText("后端版本过旧：停止旧后端，再运行 `uv run ftth serve` 启动新版")
+                    return
+                problem = backend_problem(value.get("qgis"))
+                if problem:
+                    self.status.setText(problem)
+                    self.status.setToolTip((value.get("qgis") or {}).get("error", ""))
+                elif self.backend_problem and self.status.text() == self.backend_problem:
+                    self.status.setText("")  # Cleared only if nothing newer replaced it.
+                self.backend_problem = problem
             self.api("GET", "/health", callback=health, quiet=True)
         if self.token.text() and time.monotonic() - self.last_sessions_refresh > 5:
             self.last_sessions_refresh = time.monotonic()
@@ -528,6 +544,10 @@ class Panel(QWidget):
             if sid != self.session:
                 return
             self.run_cache = {r["id"]: r for r in items}
+            entries = [(r["id"], r["status"]) for r in items]
+            if entries == self.run_entries:
+                return  # Rebuilding every second would close an open dropdown.
+            self.run_entries = entries
             for combo in (self.runs, self.compare_to):
                 previous = combo.currentData()
                 combo.clear()

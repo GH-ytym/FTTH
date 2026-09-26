@@ -1,22 +1,26 @@
 from contextlib import asynccontextmanager
 import hmac
 import json
+import logging
 
 from fastapi import FastAPI, Depends, Header, HTTPException
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from . import __version__
 from .agent import AgentController
-from .models import AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput, ReviewInput
+from .models import AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput, ReviewInput, WorkflowChoice
 from .review import ReviewController
 from .service import Service, run_summary
 from .settings import Settings
 from .store import Store
 from .titles import fallback_title
-from .models import WorkflowChoice
+
+logger = logging.getLogger("ftth.app")
 
 
-def create_app(settings=None, model=None, review_model=None):
+def create_app(settings=None, model=None, review_model=None, on_shutdown_request=None):
     settings = settings or Settings()
     store = Store(settings.data / "app.sqlite")
 
@@ -25,6 +29,8 @@ def create_app(settings=None, model=None, review_model=None):
         service = None
         try:
             service = Service(settings, store)
+            logger.info("FTTH backend %s ready: data=%s model=%s", __version__, settings.data,
+                        settings.model if settings.model_ready else "not configured")
             async with AsyncSqliteSaver.from_conn_string(str(settings.data / "checkpoints.sqlite")) as saver:
                 agent = AgentController(service, saver, model)
                 service.on_complete = agent.completed
@@ -39,6 +45,7 @@ def create_app(settings=None, model=None, review_model=None):
             if service:
                 await service.close()
             store.db.close()
+            logger.info("FTTH backend stopped")
 
     async def authenticate(authorization: str = Header(default="")):
         if not hmac.compare_digest(authorization, "Bearer " + settings.token):
@@ -52,9 +59,27 @@ def create_app(settings=None, model=None, review_model=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.6.0", "execution_authority": "user_request", "context_protocol": "task-v1", "knowledge_protocol": "source-v1", "model_configured": settings.model_ready, "model": settings.model,
+        qgis = settings.runtime_status()
+        return {"status": "ok", "version": __version__, "execution_authority": "user_request", "context_protocol": "task-v1", "knowledge_protocol": "source-v1", "model_configured": settings.model_ready, "model": settings.model,
                 "model_api": settings.model_api, "provider": settings.provider,
-                "qgis_python_exists": (settings.qgis / "bin/python.exe").exists()}
+                "qgis_python_exists": qgis["available"], "qgis": qgis}
+
+    @app.post("/shutdown", status_code=202)
+    async def shutdown():
+        if on_shutdown_request is None:
+            raise HTTPException(409, "此后端不是由 `ftth serve` 启动，请在其终端按 Ctrl+C 停止")
+        logger.info("shutdown requested over HTTP")
+        on_shutdown_request()
+        return {"status": "stopping"}
+
+    @app.post("/runtime/refresh")
+    async def refresh_runtime():
+        # Re-detect QGIS after installing it, without restarting the backend.
+        try:
+            await run_in_threadpool(settings.runtime, True)
+        except ValueError:
+            pass
+        return settings.runtime_status()
 
     @app.post("/projects")
     async def project(spec: ProjectInput):
@@ -67,10 +92,10 @@ def create_app(settings=None, model=None, review_model=None):
     @app.get("/sessions")
     def sessions():
         items = store.all("session")
-        messages = store.all("message")
         for item in items:
-            first = next((m for m in messages if m["session_id"] == item["id"] and not m.get("notification")), None)
-            item.setdefault("title", fallback_title(first["content"]) if first else "新对话")
+            if "title" not in item:
+                first = next((m for m in store.find("message", item["id"]) if not m.get("notification")), None)
+                item["title"] = fallback_title(first["content"]) if first else "新对话"
         return sorted(items, key=lambda s: s.get("updated", s.get("created", 0)), reverse=True)
 
     @app.post("/sessions/{sid}/project")
@@ -84,18 +109,21 @@ def create_app(settings=None, model=None, review_model=None):
         with store.lock:
             session = store.get("session", sid)
             messages = [{k: m[k] for k in ("id", "content", "response", "partial_response", "stream_id", "status", "notification", "elapsed_seconds", "workflow_id", "action_status") if k in m}
-                for m in sorted(store.all("message"), key=lambda m: m.get("created", 0)) if m["session_id"] == sid]
+                for m in sorted(store.find("message", sid), key=lambda m: m.get("created", 0))]
             for message in messages:
                 if message.get("notification"):
                     message.pop("content", None)
             cursor = store.db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE session=?", (sid,)).fetchone()[0]
-            activity = [dict(id=row[0], **json.loads(row[1])) for row in store.db.execute("SELECT id,data FROM events WHERE session=? AND id<=? ORDER BY id", (sid, cursor))]
+            # Stream snapshots are superseded by message objects; skip them in SQL.
+            activity = [dict(id=row[0], **json.loads(row[1])) for row in store.db.execute(
+                "SELECT id,data FROM events WHERE session=? AND id<=? AND json_extract(data, '$.type')!='assistant_stream' ORDER BY id",
+                (sid, cursor))]
             return {"session": session, "messages": messages, "cursor": cursor,
                 "active_task": app.state.service.coordinator.context({'session_id': sid, 'project_id': session.get('project_id')}),
-                "tasks": [t for t in store.all('task') if t['session_id'] == sid],
-                "workers": [w for w in store.all('worker') if w['session_id'] == sid],
-                "timeline": [e for e in activity if e['type'] not in {'assistant_stream', 'progress'}],
-                "workflows": [w for w in store.all('workflow') if w['session_id'] == sid],
+                "tasks": store.find('task', sid),
+                "workers": store.find('worker', sid),
+                "timeline": [e for e in activity if e['type'] != 'progress'],
+                "workflows": store.find('workflow', sid),
                 "activities": [e for e in activity if e["type"] in ("activity", "progress", "run", "algorithm", "review")]}
 
     @app.get('/sessions/{sid}/workflows/{wid}')
@@ -133,9 +161,7 @@ def create_app(settings=None, model=None, review_model=None):
 
     @app.post("/sessions/{sid}/runs", status_code=202)
     async def run(sid: str, spec: RunInput):
-        service = app.state.service
-        result = service.submit(sid, spec)
-        return result
+        return app.state.service.submit(sid, spec)
 
     @app.get("/sessions/{sid}/runs/{rid}/reviews")
     def reviews(sid: str, rid: str):
@@ -148,7 +174,7 @@ def create_app(settings=None, model=None, review_model=None):
     @app.get("/sessions/{sid}/runs")
     def runs(sid: str):
         store.get("session", sid)
-        return [run_summary(r) for r in store.all("run") if r["session_id"] == sid]
+        return [run_summary(r) for r in store.find("run", sid)]
 
     @app.get("/sessions/{sid}/runs/{rid}")
     def get_run(sid: str, rid: str):
@@ -173,7 +199,7 @@ def create_app(settings=None, model=None, review_model=None):
     @app.get("/sessions/{sid}/display")
     def pending(sid: str):
         store.get("session", sid)
-        return [c for c in store.all("display") if c["session_id"] == sid and c["status"] == "pending"]
+        return store.find("display", sid, status="pending")
 
     @app.post("/sessions/{sid}/display/{cid}/ack")
     def ack(sid: str, cid: str, spec: AckInput):

@@ -3,6 +3,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,14 +15,17 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import tool
 from pydantic import Field
 
+from . import credentials
 from .models import StrictModel
 from .model_client import build_model
 from .store import uid
 
+logger = logging.getLogger("ftth.review")
 SEARCH_REASONS = {"no_legal_capacity_feasible_candidate", "no_joint_capacity_feasible_combination"}
 LIMITS = {"candidate_paths": 20, "ga_population": 100, "ga_generations": 100}
 MAX_FILE = 8 * 1024 * 1024
 MAX_EVIDENCE = 24000
+VERDICT_LABELS = {"pass": "通过", "needs_review": "需要复核", "fail": "未通过", "insufficient_evidence": "证据不足"}
 
 
 class ReviewError(ValueError):
@@ -83,6 +87,8 @@ def review_settings(settings):
     result = copy.copy(settings)
     endpoint = os.environ.get("FTTH_REVIEW_BASE_URL", settings.base_url).rstrip("/")
     key = os.environ.get("FTTH_REVIEW_API_KEY")
+    if key is None:
+        key = credentials.get("review") or None
     if endpoint != settings.base_url.rstrip("/") and not key:
         raise ValueError("审查服务地址改变时必须显式配置 FTTH_REVIEW_API_KEY")
     result.base_url = endpoint
@@ -291,13 +297,20 @@ class Evidence:
             references.update(finding.evidence_ids)
         if not references <= set(self.items) or not references <= accessed:
             raise ReviewError("invalid_reference", "审查引用了不存在或未读取的证据")
+        claimed, reason = result.verdict, ""
         if self.failed:
-            result.verdict = "fail"
+            result.verdict, reason = "fail", "程序校验存在失败项"
         elif self.missing or self.truncated or set(self.items) - accessed:
             if result.verdict == "pass":
-                result.verdict = "insufficient_evidence"
+                result.verdict, reason = "insufficient_evidence", "证据缺失、截断或未全部读取"
         elif self.warning and result.verdict == "pass":
-            result.verdict = "needs_review"
+            result.verdict, reason = "needs_review", "程序校验存在警告项"
+        if result.verdict != claimed:
+            # The model's prose may still state its own verdict; never let the
+            # report read as if that verdict stood.
+            note = (f"【程序判定：结论由“{VERDICT_LABELS[claimed]}”改为“{VERDICT_LABELS[result.verdict]}”"
+                    f"（{reason}）；以下为审查模型原文。】\n")
+            result.summary = (note + result.summary)[:3000]
         result.unchecked = sorted(set(result.unchecked + self.missing + self.truncated + list(set(self.items) - accessed)))
         return result
 
@@ -346,7 +359,7 @@ class ReviewController:
 
     def list(self, sid, rid):
         self.service.owned_run(sid, rid)
-        return [x for x in self.store.all("review") if x["run_id"] == rid and x["session_id"] == sid]
+        return self.store.find("review", sid, run_id=rid)
 
     def cancel(self, sid, rid):
         for review in self.list(sid, rid):
@@ -505,6 +518,7 @@ class ReviewController:
             raise
         except Exception as exc:
             # Provider exceptions can contain credentials; store only the class.
+            logger.warning("review %s failed", review["id"], exc_info=True)
             review.update(status="failed", error=type(exc).__name__,
                 error_code=exc.code if isinstance(exc, ReviewError) else "timeout" if isinstance(exc, TimeoutError) else "review_error",
                 error_message=str(exc) if isinstance(exc, ReviewError) else "审查超时，请稍后补审。" if isinstance(exc, TimeoutError) else "审查未完成，请检查模型配置及工具调用支持后补审。")

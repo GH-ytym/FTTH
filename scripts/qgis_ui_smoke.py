@@ -1,5 +1,6 @@
 """Exercise the actual plugin widgets, map layer loader and renderer with PyQGIS."""
 import json
+from types import SimpleNamespace
 import sys
 import time
 import urllib.request
@@ -21,7 +22,7 @@ def main():
     app = QgsApplication([], True)
     app.initQgis()
     for font in ("msyh.ttc", "arial.ttf"):
-        font_id = QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
+        QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
     app.setFont(QFont("Microsoft YaHei", 9))
     from ftth_demo0.panel import Panel
     from ftth_demo0.display import show_result
@@ -29,12 +30,9 @@ def main():
     project.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
     canvas = QgsMapCanvas()
     window = QMainWindow()
-    class Iface:
-        def mapCanvas(self):
-            return canvas
-        def mainWindow(self):
-            return window
-    iface = Iface()
+    # Closures, not default arguments: the `del` before exitQgis must really release
+    # canvas/window; only the panel calls these, and it is deleted with them.
+    iface = SimpleNamespace(mapCanvas=lambda: canvas, mainWindow=lambda: window)  # noqa: F821
     panel = Panel(iface)
     panel.timer.stop()
     panel.resize(500, 900)

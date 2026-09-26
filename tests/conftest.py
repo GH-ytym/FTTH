@@ -18,9 +18,56 @@ def authorize_message(service, sid, mid, action='plan'):
 
 @pytest.fixture(autouse=True)
 def isolate_model_environment(monkeypatch):
-    for key in ("DASHSCOPE_API_KEY", "OPENAI_API_KEY", "FTTH_API_KEY", "FTTH_PROVIDER",
-                "FTTH_MODEL", "FTTH_BASE_URL", "FTTH_MODEL_API", "FTTH_ENABLE_THINKING"):
+    for key in ("DASHSCOPE_API_KEY", "OPENAI_API_KEY", "FTTH_API_KEY"):
         monkeypatch.delenv(key, raising=False)
+    # No setting, config file or installed QGIS on the developer's machine
+    # may change test outcomes; runtime tests build explicit fake layouts.
     for key in list(os.environ):
-        if key.startswith("FTTH_REVIEW_"):
+        if key.startswith("FTTH_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("backend.qgis_runtime.candidates", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def release_log_handlers():
+    """`ftth` commands attach file handlers globally; close them after each test."""
+    yield
+    import logging
+    from backend.logs import HANDLER_NAME
+    for name in ("ftth", "uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        for handler in [h for h in logger.handlers if h.get_name() == HANDLER_NAME]:
+            logger.removeHandler(handler)
+            handler.close()
+
+
+class MemoryKeyring:
+    """In-process stand-in for the OS credential store."""
+    priority = 1
+
+    def __init__(self):
+        self.values = {}
+
+    def get_password(self, service, username):
+        return self.values.get((service, username))
+
+    def set_password(self, service, username, password):
+        self.values[(service, username)] = password
+
+    def delete_password(self, service, username):
+        from keyring.errors import PasswordDeleteError
+        if (service, username) not in self.values:
+            raise PasswordDeleteError(username)
+        del self.values[(service, username)]
+
+
+@pytest.fixture(autouse=True)
+def isolate_credentials(monkeypatch):
+    """Never read or write the developer's real Keychain / Credential Manager."""
+    import keyring
+    from keyring.backend import KeyringBackend
+    store = type("TestKeyring", (MemoryKeyring, KeyringBackend), {})()
+    monkeypatch.setattr(keyring.core, "_keyring_backend", store)
+    # Child processes started by tests get a store that holds nothing.
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    yield store

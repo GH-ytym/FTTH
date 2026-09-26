@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -59,6 +58,10 @@ def test_evidence_and_non_overridable_failure(tmp_path):
     evidence = Evidence(service, run)
     output = evidence.enforce(ReviewResult(verdict="pass", summary="all good", checked=list(evidence.items)), set(evidence.items))
     assert output.verdict == "fail"
+    # A real model's summary said "pass" beside a stored non-pass verdict; the
+    # report must name the override before the model's own words.
+    assert output.summary.startswith("【程序判定：结论由“通过”改为“未通过”（程序校验存在失败项）")
+    assert output.summary.endswith("all good")
     with pytest.raises(ValueError):
         evidence.repair_patch(output)
 
@@ -68,7 +71,8 @@ def test_partition_does_not_require_full_reports(tmp_path):
     run["result"].pop("output_dir")
     evidence = Evidence(service, run)
     assert not evidence.missing
-    assert evidence.enforce(ReviewResult(verdict="pass", summary="分区检查完成"), set(evidence.items)).verdict == "pass"
+    kept = evidence.enforce(ReviewResult(verdict="pass", summary="分区检查完成"), set(evidence.items))
+    assert (kept.verdict, kept.summary) == ("pass", "分区检查完成")
 
 
 @pytest.mark.parametrize("problem", ["missing", "unread", "truncated"])
@@ -381,8 +385,11 @@ def test_compare(old, new, expected):
 
 
 def test_secret_not_in_worker_env(tmp_path, monkeypatch):
+    from backend.qgis_runtime import QgisRuntime
     monkeypatch.setenv("FTTH_REVIEW_API_KEY", "secret")
-    assert "FTTH_REVIEW_API_KEY" not in Settings(tmp_path).worker_env()
+    settings = Settings(tmp_path)
+    settings.use_runtime(QgisRuntime(tmp_path / "python", "osgeo4w", tmp_path, "test"))
+    assert "FTTH_REVIEW_API_KEY" not in settings.worker_env()
 
 
 def test_supplement_request_stays_idempotent_after_existing_review_finishes(tmp_path):

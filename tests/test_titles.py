@@ -42,3 +42,23 @@ def test_known_task_does_not_call_model(monkeypatch):
         raise AssertionError("No title API needed for this explicit task")
     monkeypatch.setattr(titles, "build_model", forbidden)
     assert asyncio.run(titles.generate_title(SimpleNamespace(provider="qwen"), "使用51IMB配置执行完整规划")) == "51IMB完整规划"
+
+
+def test_workflow_handled_first_message_still_gets_generated_title(tmp_path, monkeypatch):
+    from backend.agent import AgentController
+    from backend.models import MessageInput
+    from test_service import setup_service
+    service, sid, _ = setup_service(tmp_path)
+    service.spawn = lambda coro: coro.close()
+    settings = service.settings
+    settings.model, settings.base_url = "synthetic", "https://synthetic.invalid/v1"
+    controller = AgentController(service, None)
+    async def start(item):
+        return {"status": "blocked"}, "请明确本轮任务。"
+    controller.workflows.start = start
+    monkeypatch.setattr("backend.agent.generate_title", AsyncMock(return_value="规划需求澄清"))
+    item = controller.enqueue(sid, MessageInput(request_id="first", content="帮我处理一下"))
+    asyncio.run(controller.respond(item))
+    assert service.store.get("message", item["id"])["response"] == "请明确本轮任务。"
+    assert service.store.get("session", sid)["title"] == "规划需求澄清"
+    assert any(e["type"] == "session_title" for e in service.store.events(sid, 0))

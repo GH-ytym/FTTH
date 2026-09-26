@@ -19,7 +19,10 @@ def test_qwen_defaults_and_secret_isolation(tmp_path, monkeypatch):
     assert settings.model == "qwen3.8-flash"
     assert settings.base_url == "https://maas.qianwenaiapi.com/compatible-mode/v1"
     assert settings.model_ready
-    assert "DASHSCOPE_API_KEY" not in settings.worker_env()
+    from backend.qgis_runtime import QgisRuntime
+    for layout in ("host", "osgeo4w", "macos-bundle", "conda", "system"):
+        settings.use_runtime(QgisRuntime(tmp_path / "python", layout, tmp_path, "test"))
+        assert "DASHSCOPE_API_KEY" not in settings.worker_env()
     monkeypatch.delenv("DASHSCOPE_API_KEY")
     monkeypatch.setenv("FTTH_PROVIDER", "qwen")
     assert not Settings(tmp_path).model_ready
@@ -69,7 +72,7 @@ def test_streamed_reasoning_tool_result_round_trip(tmp_path, monkeypatch):
 
 
 def test_responses_option_and_thinking_switch(tmp_path, monkeypatch):
-    settings = qwen_settings(tmp_path, monkeypatch)
+    qwen_settings(tmp_path, monkeypatch)  # Provider environment only.
     monkeypatch.setenv("FTTH_MODEL_API", "responses")
     monkeypatch.setenv("FTTH_ENABLE_THINKING", "false")
     model = build_model(Settings(tmp_path))
@@ -77,3 +80,4 @@ def test_responses_option_and_thinking_switch(tmp_path, monkeypatch):
     assert "input" in payload and "messages" not in payload
     assert payload["extra_body"]["enable_thinking"] is False
     assert model.use_responses_api is True
+

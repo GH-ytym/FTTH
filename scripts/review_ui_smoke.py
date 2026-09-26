@@ -6,7 +6,8 @@ import time
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
-plugins = Path(os.environ["APPDATA"]) / "QGIS/QGIS3/profiles/default/python/plugins" if os.environ.get("DEMO_TEST_INSTALLED") else ROOT / "qgis_plugin"
+# DEMO_TEST_PLUGINS points at an installed copy; otherwise test the source tree.
+plugins = Path(os.environ.get("DEMO_TEST_PLUGINS") or ROOT / "qgis_plugin")
 sys.path[:0] = [str(ROOT / "vendor/ftth"), str(plugins)]
 from task_bridge import prepare_qgis_runtime
 handles = prepare_qgis_runtime()
@@ -57,7 +58,7 @@ assert "独立审查" in p.transcript.replies[mid].current_text
 p.review_report()
 wait(lambda: '审查结论：' in p.report_box.toPlainText())
 assert '补充审查（不启动自动重算）' in p.report_box.toPlainText()
-out = ROOT / "runtime/release-0.5.0"
+out = ROOT / "runtime/ui-screenshots"
 out.mkdir(parents=True, exist_ok=True)
 p.grab().save(str(out / "review-report.png"))
 p.home()

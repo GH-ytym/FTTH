@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from test_service import setup_service
+from test_service import setup_service, use_host_python
 from test_agent import FakeSubmitModel, FakeToolModel
 from backend.agent import AgentController
 from backend.app import create_app
@@ -55,6 +55,7 @@ def test_second_service_cannot_interrupt_first_service_records(tmp_path):
 def test_cancel_during_process_creation_stops_child(tmp_path):
     async def scenario():
         service, sid, _ = setup_service(tmp_path)
+        use_host_python(service)
         service.store.put("run", {"id": "race", "session_id": sid, "status": "running"})
         entered, release = asyncio.Event(), asyncio.Event()
         original = asyncio.create_subprocess_exec
@@ -94,7 +95,7 @@ def test_history_cursor_cannot_skip_unpersisted_assistant_response(tmp_path):
         service.store.publish_message = interleaved
         client.headers["Authorization"] = "Bearer " + service.settings.token
         client.post(f"/sessions/{sid}/messages", json={"request_id": "audit", "content": "检查数据"})
-        for _ in range(200):
+        for _ in range(1500):  # Early exit; the bound only absorbs slow cold starts.
             saved = service.store.all("message")
             if observed and saved and saved[0]["status"] == "succeeded":
                 break

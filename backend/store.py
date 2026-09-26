@@ -10,29 +10,62 @@ def uid(prefix):
     return prefix + "_" + uuid.uuid4().hex[:16]
 
 
+# Update in place so rowid keeps creation order; INSERT OR REPLACE would move an
+# updated older record (e.g. a run receiving review progress) after newer ones.
+UPSERT = "INSERT INTO objects VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data"
+# Must match the objects_session index expression for SQLite to use it.
+SESSION = "json_extract(data, '$.session_id')"
+# Ordered, append-only schema migrations; PRAGMA user_version counts applied steps.
+MIGRATIONS = (
+    # 1: tables as of 0.6.0 (earlier databases lack workflow_actions).
+    """CREATE TABLE IF NOT EXISTS objects (kind TEXT, id TEXT, data TEXT, PRIMARY KEY(kind,id));
+    CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, data TEXT);
+    CREATE TABLE IF NOT EXISTS requests (session TEXT, key TEXT, value TEXT, PRIMARY KEY(session,key));
+    CREATE TABLE IF NOT EXISTS workflow_actions (session TEXT, owner TEXT, action TEXT, digest TEXT, run_id TEXT,
+        PRIMARY KEY(session,owner,action));""",
+    # 2: session-scoped lookups used by polling endpoints.
+    f"""CREATE INDEX IF NOT EXISTS objects_session ON objects(kind, {SESSION});
+    CREATE INDEX IF NOT EXISTS events_session ON events(session, id);""",
+    # 3: drop cumulative stream snapshots older versions kept. Message objects hold
+    # partial and final text; no backend is running during migration, and the
+    # pre-migration backup keeps the originals.
+    "DELETE FROM events WHERE json_extract(data, '$.type') = 'assistant_stream';",
+)
+SCHEMA_VERSION = len(MIGRATIONS)
+
+
 class Store:
     def __init__(self, path):
         self.lock = threading.RLock()
+        self.path = Path(path)
         self.db = sqlite3.connect(path, check_same_thread=False)
-        exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'").fetchone()
-        migrated = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_actions'").fetchone()
-        if exists and not migrated:
-            backup = Path(str(path) + '.pre-0.6.0-' + uuid.uuid4().hex[:8] + '.bak')
-            with sqlite3.connect(backup) as dest:
-                self.db.backup(dest)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript("""
-        CREATE TABLE IF NOT EXISTS objects (kind TEXT, id TEXT, data TEXT, PRIMARY KEY(kind,id));
-        CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, data TEXT);
-        CREATE TABLE IF NOT EXISTS requests (session TEXT, key TEXT, value TEXT, PRIMARY KEY(session,key));
-        CREATE TABLE IF NOT EXISTS workflow_actions (session TEXT, owner TEXT, action TEXT, digest TEXT, run_id TEXT,
-            PRIMARY KEY(session,owner,action));
-        """)
-        self.db.commit()
+        self.migrate()
+
+    def migrate(self):
+        current = self.db.execute("PRAGMA user_version").fetchone()[0]
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if current == 0 and "workflow_actions" in tables:
+            current = 1  # 0.6.0 created these tables before schema versioning.
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(f"数据库 {self.path} 的结构版本 {current} 高于本程序支持的 {SCHEMA_VERSION}；请使用更新的后端打开，避免旧版本改写数据")
+        if current < SCHEMA_VERSION and "objects" in tables:
+            # Every upgrade of existing data is preceded by a restorable copy.
+            backup = Path(f"{self.path}.pre-schema-v{SCHEMA_VERSION}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.bak")
+            dest = sqlite3.connect(backup)
+            try:
+                self.db.backup(dest)
+            finally:
+                dest.close()
+        for version in range(current, SCHEMA_VERSION):
+            self.db.executescript(f"BEGIN;\n{MIGRATIONS[version]}\nPRAGMA user_version = {version + 1};\nCOMMIT;")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self.db.commit()
 
     def put(self, kind, item):
         with self.lock:
-            self.db.execute("INSERT OR REPLACE INTO objects VALUES (?,?,?)", (kind, item['id'], json.dumps(item, ensure_ascii=False)))
+            self.db.execute(UPSERT, (kind, item['id'], json.dumps(item, ensure_ascii=False)))
             self.db.commit()
         return item
 
@@ -47,7 +80,7 @@ class Store:
                 return self.get('run', row[1]), False
             self.db.execute('INSERT INTO workflow_actions VALUES (?,?,?,?,?)', (session, owner, action, digest, run['id']))
             for kind, item in [('run', run), *objects]:
-                self.db.execute('INSERT OR REPLACE INTO objects VALUES (?,?,?)', (kind, item['id'], json.dumps(item, ensure_ascii=False)))
+                self.db.execute(UPSERT, (kind, item['id'], json.dumps(item, ensure_ascii=False)))
             self.db.execute('INSERT INTO requests VALUES (?,?,?)', (session, request_key, run['id']))
             self.db.execute('INSERT INTO events(session,data) VALUES (?,?)', (session, json.dumps(dict(type='run', time=time.time(), run_id=run['id'], status='queued'))))
             for kind, item in objects:
@@ -55,16 +88,32 @@ class Store:
                     self.db.execute('INSERT INTO events(session,data) VALUES (?,?)', (session, json.dumps(dict(type='workflow', time=time.time(), workflow=item), ensure_ascii=False)))
             return run, True
 
-    def get(self, kind, id):
+    def lookup(self, kind, id):
         with self.lock:
             row = self.db.execute("SELECT data FROM objects WHERE kind=? AND id=?", (kind, id)).fetchone()
-        if not row:
+        return json.loads(row[0]) if row else None
+
+    def get(self, kind, id):
+        item = self.lookup(kind, id)
+        if item is None:
             raise ValueError(f"不存在的 {kind}: {id}")
-        return json.loads(row[0])
+        return item
 
     def all(self, kind):
         with self.lock:
             return [json.loads(r[0]) for r in self.db.execute("SELECT data FROM objects WHERE kind=? ORDER BY rowid", (kind,))]
+
+    def find(self, kind, session_id, /, **where):
+        """One session's objects in creation order, filtered by top-level fields in SQL."""
+        sql = f"SELECT data FROM objects WHERE kind=? AND {SESSION}=?"
+        params = [kind, session_id]
+        for field, value in where.items():
+            if not field.isidentifier():
+                raise ValueError("无效的查询字段：" + field)
+            sql += f" AND json_extract(data, '$.{field}')=?"
+            params.append(value)
+        with self.lock:
+            return [json.loads(r[0]) for r in self.db.execute(sql + " ORDER BY rowid", params)]
 
     def event(self, session, kind, **data):
         with self.lock:
@@ -74,19 +123,23 @@ class Store:
     def publish_message(self, item, events):
         """Commit the message snapshot and its event cursor boundary together."""
         with self.lock, self.db:
-            self.db.execute("INSERT OR REPLACE INTO objects VALUES (?,?,?)",
-                ("message", item["id"], json.dumps(item, ensure_ascii=False)))
+            self.db.execute(UPSERT, ("message", item["id"], json.dumps(item, ensure_ascii=False)))
             for kind, data in events:
                 self.db.execute("INSERT INTO events(session,data) VALUES (?,?)",
                     (item["session_id"], json.dumps(dict(type=kind, time=time.time(),
                         message_id=item["id"], **data), ensure_ascii=False)))
+            if any(kind == "assistant" for kind, _ in events):
+                # Each stream event holds the cumulative text, so keeping them
+                # grows quadratically with reply length. The final reply event
+                # committed here supersedes every snapshot of this message.
+                self.db.execute("DELETE FROM events WHERE session=? AND json_extract(data, '$.type')='assistant_stream'"
+                    " AND json_extract(data, '$.message_id')=?", (item["session_id"], item["id"]))
 
     def publish_objects(self, objects, session_id, event_type, **event):
         """One durable boundary for a workflow transition and its UI event."""
         with self.lock, self.db:
             for kind, item in objects:
-                self.db.execute("INSERT OR REPLACE INTO objects VALUES (?,?,?)",
-                    (kind, item['id'], json.dumps(item, ensure_ascii=False)))
+                self.db.execute(UPSERT, (kind, item['id'], json.dumps(item, ensure_ascii=False)))
             self.db.execute("INSERT INTO events(session,data) VALUES (?,?)",
                 (session_id, json.dumps(dict(type=event_type, time=time.time(), **event), ensure_ascii=False)))
 

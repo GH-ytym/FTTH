@@ -2,8 +2,8 @@
 name=FTTH Agent demo0
 qgisMinimumVersion=3.34
 qgisMaximumVersion=3.99
-description=实时回复与动态状态、会话工程策略、数据快照和规划交付
-version=0.6.0
+description=对话规划、会话工程策略、数据快照、独立审查与规划交付
+version=0.7.0
 author=FTTH demo0
 category=Vector
 experimental=True
