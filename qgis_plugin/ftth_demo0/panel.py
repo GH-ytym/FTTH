@@ -9,7 +9,7 @@ from qgis.PyQt.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetwork
 from qgis.PyQt.QtGui import QFont, QFontDatabase
 from qgis.PyQt.QtWidgets import QWidget, QFileDialog, QCheckBox
 from qgis.core import QgsVectorFileWriter, QgsProject
-from .input_config_builder import build_task1_config, BUSINESS_LAYERS
+BUSINESS_LAYERS = ("IMB", "SITE", "PTECH", "INFRASTRUCTURE")
 from .display import show_result
 from .fluent_ui import build_ui, button, hover_feedback
 from .connection import backend_problem
@@ -62,7 +62,11 @@ class Panel(QWidget):
         self.displayed = {}
         self.net = QNetworkAccessManager(self)
         self.replies = set()
+        self.data_dirty = False
+        self.data_revision = 0
         build_ui(self, BUSINESS_LAYERS)
+        for widget in [*self.sources.values(), *self.sublayers.values(), self.recognition]:
+            widget.textChanged.connect(self.data_changed)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(250)
@@ -123,6 +127,8 @@ class Panel(QWidget):
         generation = self.view_generation
         self.session = session["id"]
         self.session_project = session.get("project_id")
+        self.data_dirty = True
+        self.data_status.setText("正在读取当前会话已登记的数据…")
         self.project_id = self.session_project
         self.title_button.setText(session.get("title", "新对话"))
         self.title_button.setToolTip(session.get("title", "新对话"))
@@ -174,28 +180,63 @@ class Panel(QWidget):
                 self.workflow_event(workflow)
             self.loading_history = False
         self.api("GET", self.route("history"), callback=loaded)
+        revision = self.data_revision
+        def data_loaded(value):
+            if sid != self.session or generation != self.view_generation or revision != self.data_revision:
+                return
+            self.load_data_form(value.get("inputs", {}), value.get("recognition_path") or "")
+            self.data_dirty = False
+            self.data_status.setText("当前会话已登记道路 GPKG" if value.get("recognition_path") else "当前会话未登记道路 GPKG；可使用有数据的 INFRA 兜底")
+        self.api("GET", self.route("project"), callback=data_loaded)
 
-    def registered_project(self, project, origin_sid, origin_project, generation):
+    def data_changed(self, *args):
+        self.data_dirty = True
+        self.data_revision += 1
+        self.data_status.setText("输入已修改，尚未登记。请点击“登记数据 · 新建会话”后再规划。")
+
+    def load_data_form(self, inputs, recognition):
+        for name in BUSINESS_LAYERS:
+            item = inputs.get(name, {})
+            self.sources[name].setText(item.get("path", ""))
+            self.sublayers[name].setText(item.get("source_layer", ""))
+        self.recognition.setText(recognition)
+
+    def form_inputs(self):
+        return {n: {"path": self.sources[n].text().strip(), "source_layer": self.sublayers[n].text().strip()} for n in BUSINESS_LAYERS}
+
+    def data_ready(self):
+        if self.data_dirty:
+            self.status.setText("输入尚未登记，请先在数据页点击“登记数据 · 新建会话”。")
+            return False
+        return True
+
+    def registered_project(self, project, origin_sid, origin_project, generation, revision):
         if origin_sid and not origin_project:
             def bound(value):
                 if origin_sid == self.session and generation == self.view_generation:
                     self.project_id = project["id"]
                     self.session_project = project["id"]
+                    if revision != self.data_revision:
+                        self.status.setText("已登记提交时的数据；随后修改的输入仍需重新登记。")
+                        return
                     self.tabs.setCurrentIndex(0)
                     self.status.setText("项目数据已登记")
+                    self.data_dirty = False
+                    self.data_status.setText("当前会话已登记道路 GPKG" if project.get("recognition_path") else "已登记；未提供道路 GPKG")
             self.api("POST", "/sessions/" + origin_sid + "/project", {"project_id": project["id"]}, bound)
         else:
             # Keep a registered project reachable even if the user navigated away.
             def created(session):
                 self.last_sessions_refresh = 0
-                if generation == self.view_generation:
+                if generation == self.view_generation and revision == self.data_revision:
                     self.open_session(session)
                     self.status.setText("项目数据已登记")
             self.api("POST", "/sessions", {"project_id": project["id"]}, created)
 
     def registration_callback(self):
         sid, project, generation = self.session, self.session_project, self.view_generation
-        return lambda value: self.registered_project(value, sid, project, generation)
+        revision = self.data_revision
+        return lambda value: self.registered_project(value, sid, project, generation, revision)
 
     def apply_policy(self, policy):
         for name in ("use_formal_infrastructure", "use_recognition_roads", "split_oversized_imbs"):
@@ -219,6 +260,8 @@ class Panel(QWidget):
     def api(self, method, path, payload=None, callback=None, quiet=False):
         request_key = (method, path)
         if request_key in self.busy:
+            if not quiet:
+                self.status.setText("相同请求正在处理，请等待完成。")
             return
         self.busy.add(request_key)
         req = QNetworkRequest(QUrl(self.url.text().rstrip("/") + path))
@@ -245,6 +288,8 @@ class Panel(QWidget):
                 if path.endswith("/history"):
                     self.loading_history = False
                 self.status.setText(str(exc))
+                if path == "/projects":
+                    self.data_status.setText("登记失败：" + str(exc))
                 if not quiet:
                     self.transcript.append("错误：" + str(exc))
             finally:
@@ -293,21 +338,19 @@ class Panel(QWidget):
             self.status.setText(str(exc))
 
     def register(self):
-        try:
-            path = self.workspace() / "config.json"
-            build_task1_config(Path(__file__).parent / "task1_config.json", path,
-                {n: {"path": self.sources[n].text().strip(), "source_layer": self.sublayers[n].text().strip()} for n in BUSINESS_LAYERS})
-            self.api("POST", "/projects", {"name": QgsProject.instance().title() or "QGIS项目", "config_path": str(path), "recognition_path": self.recognition.text().strip() or None}, self.registration_callback())
-        except Exception as exc:
-            self.status.setText(str(exc))
-
-    def import_config(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入有明确字段映射的输入配置", "", "JSON (*.json)")
-        if not path:
+        inputs = {name: value for name, value in self.form_inputs().items() if value["path"]}
+        if "IMB" not in inputs:
+            self.data_status.setText("请选择 IMB 需求数据")
             return
-        self.api("POST", "/projects", {"name": Path(path).stem, "config_path": path, "recognition_path": self.recognition.text().strip() or None}, self.registration_callback())
+        self.api("POST", "/projects", {
+            "name": QgsProject.instance().title() or "QGIS项目",
+            "sources": inputs,
+            "recognition_path": self.recognition.text().strip() or None,
+        }, self.registration_callback())
 
     def send(self):
+        if not self.data_ready():
+            return
         text = self.message.text().strip()
         if not text or self.creating_session:
             return
@@ -339,6 +382,8 @@ class Panel(QWidget):
             "allow_auto_repair": allow_auto_repair}, accepted)
 
     def manual(self, execute):
+        if not self.data_ready():
+            return
         if not self.session:
             self.status.setText("请先登记数据")
             return

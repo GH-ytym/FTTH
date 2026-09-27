@@ -26,12 +26,16 @@ from test_workflow import IntentModel
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "runtime/51imb-config.json")
+    for name in ("imb", "site", "ptech", "infrastructure"):
+        parser.add_argument("--" + name, type=Path, required=name == "imb")
+        parser.add_argument("--" + name + "-layer", default="")
+    parser.add_argument("--roads", type=Path)
     parser.add_argument("--real-model", action="store_true")
     parser.add_argument('--workflow', action='store_true')
     args = parser.parse_args()
-    if not args.config.is_file():
-        raise SystemExit("需要本地真实数据配置；可通过 --config 指定。")
+    sources = {name.upper(): {"path": str(getattr(args, name).resolve()),
+                             "source_layer": getattr(args, name + "_layer")}
+               for name in ("imb", "site", "ptech", "infrastructure") if getattr(args, name)}
     directory = ROOT / "runtime" / f"release-{__version__}" / ("e2e-" + uuid.uuid4().hex[:8])
     settings = Settings(directory)
     configured = review_settings(settings)
@@ -52,7 +56,7 @@ def main():
     receipt = {"model_test": "real" if args.real_model else "scripted", "data_directory": str(directory)}
     with TestClient(create_app(settings, model=main_model, review_model=model)) as client:
         client.headers["Authorization"] = "Bearer " + settings.token
-        project = client.post("/projects", json={"name": "0.5.0 acceptance", "config_path": str(args.config.resolve())})
+        project = client.post("/projects", json={"name": "0.5.0 acceptance", "sources": sources, "recognition_path": str(args.roads.resolve()) if args.roads else None})
         assert project.status_code == 200, project.text
         sid = client.post("/sessions", json={"project_id": project.json()["id"]}).json()["id"]
         if args.workflow:

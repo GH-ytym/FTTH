@@ -265,6 +265,34 @@ class RecoveringReviewModel(FakeToolModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[call]))])
 
 
+class MissingReviewModel(ReviewModel):
+    always_missing: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        generated = super()._generate(messages, stop, run_manager, **kwargs)
+        message = generated.generations[0].message
+        corrected = any(m.type == 'human' and '未返回有效的 ReviewResult' in str(m.content) for m in messages)
+        if message.tool_calls[0]['name'] == 'ReviewResult' and (self.always_missing or not corrected):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='证据已读取。'))])
+        return generated
+
+
+@pytest.mark.parametrize('always_missing', [False, True])
+def test_missing_structured_result_has_one_bounded_correction(tmp_path, always_missing):
+    async def scenario():
+        service, sid, _, run, _ = fixture_run(tmp_path, search=False)
+        controller = service.reviewer = ReviewController(service, MissingReviewModel(always_missing=always_missing))
+        review = controller.enqueue(sid, run['id'], 'missing-result')
+        await controller.execute(review)
+        saved = service.store.get('review', review['id'])
+        assert saved['status'] == ('failed' if always_missing else 'completed'), saved
+        if always_missing:
+            assert saved['error_code'] == 'missing_result'
+            assert '无需重跑规划' in saved['error_message']
+        assert len(service.store.all('run')) == 1
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("always_bad", [False, True])
 def test_query_and_reference_recovery_stays_bounded(tmp_path, always_bad):
     async def scenario():

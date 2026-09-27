@@ -47,6 +47,10 @@ FastAPI 后端（Python 3.12）
 
 ## 快速启动
 
+Windows 日常启动：复制 `.env.example` 为仓库根目录的 `.env`，填写其中的 `FTTH_API_KEY`，然后双击 `start_backend.cmd`。后续直接双击即可，无需每次输入命令或 Key。停止时按启动窗口的 Ctrl+C，或双击 `stop_backend.cmd`。
+
+`.env` 已被 Git 忽略；只修改本机 `.env`，不要把真实 Key 填进会提交的 `.env.example`。模板沿用本项目的千问模型和接口默认值，可按所用服务修改。脚本按文本读取配置，不执行其中的命令；配置文件中明确列出的项覆盖终端环境变量。未填写 Key 时会提示补充，模型连通性可另用 `scripts/start_qwen.ps1` 的启动前检查。原有 `uv run ftth serve` 命令不自动读取 `.env`。
+
 所有平台使用同一个命令行入口 `ftth`（`uv run ftth --help` 查看全部命令）。
 
 ### 1. 获取代码并检查环境
@@ -117,7 +121,7 @@ QGIS 配置目录按平台约定定位（Windows `%APPDATA%\QGIS\QGIS3\profiles`
 ## 从数据到完整规划
 
 1. 数据页选择 IMB 及可用的 SITE、PTECH、INFRASTRUCTURE。支持 SHP、GPKG、GeoJSON、CSV、XLSX；GPKG/XLSX 可填写图层或工作表名。
-2. 也可“导入配置 JSON”使用已有字段映射。源文件必须在本机存在；相对路径按 JSON 所在目录解析。
+2. 单独选择道路 GPKG（优先路由来源）；未提供时使用有数据的 INFRA 兜底。无需准备或导入 JSON 配置，字段识别与算法配置由后端自动生成。
 3. 登记输入快照并绑定会话。“当前图层”按钮有选中要素时保存所选部分，否则保存整层。
 4. 勾选道路来源及拆分策略，点击 **保存本会话工程策略**。
 5. 直接发送“开始完整规划”或“导出上次结果”；讨论、假设和否定请求进入问答，无需切换模式。
@@ -258,7 +262,7 @@ uv run python scripts/verify_streaming_ui.py --installed
 uv run python -X utf8 scripts/verify_review_ui.py --installed
 
 # 真实本地 51IMB 数据和算法 + 脚本化审查模型；使用独立数据目录
-uv run python -X utf8 scripts/verify_reviews.py --config runtime/51imb-config.json
+uv run python -X utf8 scripts/verify_reviews.py --imb /path/to/IMB.shp --site /path/to/SITE.shp --roads /path/to/roads.gpkg
 
 # 显式使用当前终端配置的真实审查模型；没有配置会直接退出
 uv run python -X utf8 scripts/verify_reviews.py --real-model

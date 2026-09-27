@@ -52,6 +52,22 @@ def test_saved_policy_is_inherited_and_current_request_creates_one_run(tmp_path)
     assert service.store.get('run', w['run_id'])['parameters']['use_formal_infrastructure']
 
 
+@pytest.mark.parametrize('roads,formal', [(True, True), (True, False), (False, True)])
+def test_default_routing_prefers_roads_and_falls_back_to_infra(tmp_path, roads, formal):
+    service, controller, item, _ = fixture(tmp_path)
+    project = service.store.get('project', 'p')
+    project['recognition_path'] = 'roads.gpkg' if roads else None
+    project['summary']['infrastructure_count'] = 3 if formal else 0
+    service.store.put('project', project)
+    session = service.store.get('session', item['session_id'])
+    session.pop('policy_confirmed_at', None)
+    service.store.put('session', session)
+    w, _ = asyncio.run(controller.start(item))
+    assert w['status'] == 'waiting_choice'
+    assert w['proposed_policy']['use_recognition_roads'] is roads
+    assert w['proposed_policy']['use_formal_infrastructure'] is (formal and not roads)
+
+
 @pytest.mark.parametrize('legacy', [None, True, False])
 @pytest.mark.parametrize('auto_rerun', [True, False])
 def test_request_authorizes_plan_then_export_without_mode(tmp_path, legacy, auto_rerun):

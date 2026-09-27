@@ -111,22 +111,25 @@ def test_registration_callback_binds_original_session(tmp_path):
     # This tests callback state handling, not Qt rendering or real HTTP timing.
     tree = ast.parse((ROOT / "qgis_plugin/ftth_demo0/panel.py").read_text(encoding="utf-8"))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Panel")
-    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in {"register", "registered_project", "registration_callback"}]
-    namespace = {"Path": Path, "BUSINESS_LAYERS": [], "__file__": str(ROOT / "qgis_plugin/ftth_demo0/panel.py"),
-        "build_task1_config": lambda *a: None,
+    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in {"register", "registered_project", "registration_callback", "form_inputs"}]
+    namespace = {"Path": Path, "BUSINESS_LAYERS": ["IMB"], "__file__": str(ROOT / "qgis_plugin/ftth_demo0/panel.py"),
         "QgsProject": SimpleNamespace(instance=lambda: SimpleNamespace(title=lambda: "Project A"))}
     exec(compile(ast.Module(body=methods, type_ignores=[]), "panel-review-methods", "exec"), namespace)
     class StandIn:
         register = namespace["register"]
         registered_project = namespace["registered_project"]
         registration_callback = namespace["registration_callback"]
+        form_inputs = namespace["form_inputs"]
+        data_revision = 0
         view_generation = 0
         session = "session-A"
         session_project = None
-        sources, sublayers = {}, {}
+        sources = {"IMB": SimpleNamespace(text=lambda: "IMB.shp")}
+        sublayers = {"IMB": SimpleNamespace(text=lambda: "")}
         recognition = SimpleNamespace(text=lambda: "")
         project_label = SimpleNamespace(setText=lambda _: None)
         status = SimpleNamespace(setText=lambda _: None)
+        data_status = SimpleNamespace(setText=lambda _: None)
         def workspace(self): return tmp_path
         def route(self, suffix): return f"/sessions/{self.session}/{suffix}"
         def api(self, method, route, payload, callback):

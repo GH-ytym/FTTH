@@ -526,7 +526,6 @@ def build_ui(p, business_layers):
 
     area, page, layout = scroll_page()
     c, box = card(page, "项目数据", "登记后创建独立会话；当前图层有选中要素时仅保存所选部分。")
-    box.addWidget(button("导入配置 JSON", p.import_config, True, FIF.FOLDER))
     p.sources, p.sublayers = {}, {}
     labels = {"IMB": "楼栋需求", "SITE": "局站", "PTECH": "技术点位", "INFRASTRUCTURE": "基础设施"}
     for name in business_layers:
@@ -544,9 +543,12 @@ def build_ui(p, business_layers):
         row.addWidget(button("当前图层", lambda checked=False, n=name: p.current_layer(n)))
         box.addLayout(row)
     p.recognition = LineEdit(c)
-    p.recognition.setPlaceholderText("可选：识别道路 GeoPackage")
+    p.recognition.setPlaceholderText("道路 GeoPackage（优先）；未提供时使用 INFRA 兜底")
     box.addWidget(p.recognition)
-    box.addWidget(button("选择识别结果", p.browse_recognition))
+    box.addWidget(button("选择道路 GPKG", p.browse_recognition))
+    p.data_status = BodyLabel("逐项选择数据文件后，点击登记数据。", c)
+    p.data_status.setWordWrap(True)
+    box.addWidget(p.data_status)
     box.addWidget(button("登记数据 · 新建会话", p.register, True, FIF.ADD))
     box.addWidget(button("检查当前会话数据", lambda: p.api("GET", p.route("project"), callback=p.report)))
     layout.addWidget(c)

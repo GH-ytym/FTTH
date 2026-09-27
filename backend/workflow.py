@@ -245,9 +245,10 @@ class WorkflowController:
             overrides = dict(intent.get('parameter_overrides') or {})
             policy = session.get('policy', {})
             if not session.get('policy_confirmed_at'):
-                formal = bool(project['summary'].get('infrastructure_count'))
+                roads = bool(project.get('recognition_path'))
+                formal = not roads and bool(project['summary'].get('infrastructure_count'))
                 policy = {'use_formal_infrastructure': formal,
-                    'use_recognition_roads': not formal and bool(project.get('recognition_path')),
+                    'use_recognition_roads': roads,
                     'split_oversized_imbs': intent.get('scope') != 'partition'}
             proposed = {**{k: policy.get(k, False) for k in PolicyInput.model_fields}, **{k: overrides[k] for k in PolicyInput.model_fields if k in overrides}}
             w['proposed_policy'] = proposed

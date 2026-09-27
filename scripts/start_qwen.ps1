@@ -1,5 +1,4 @@
-# Compatibility wrapper for `uv run ftth serve --provider qwen --check-model`.
-# The key is read with hidden input by ftth when FTTH_API_KEY/DASHSCOPE_API_KEY are unset.
+# Qwen compatibility wrapper: read local .env and check the model before serving.
 param(
     [ValidateSet('chat','responses')][string]$Api = 'chat',
     [switch]$NoThinking,
@@ -9,5 +8,6 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath (Split-Path $PSScriptRoot -Parent)
 $cli = @('serve', '--provider', 'qwen', '--api', $Api, '--check-model', '--port', $Port)
 if ($NoThinking) { $cli += '--no-thinking' }
-uv run ftth @cli
+$launchArgs = $cli | Select-Object -Skip 1
+uv run --frozen python -X utf8 scripts/start_backend.py @launchArgs
 exit $LASTEXITCODE

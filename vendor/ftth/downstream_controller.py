@@ -445,6 +445,7 @@ def _task6_base(
     terminal_snap_distance_m: float,
 ) -> Path:
     imbs = _read_csv(stage / "task3" / "input" / "IMB.csv")
+    use_formal_infrastructure = use_formal_infrastructure and not use_recognition_roads
 
     roads: list[dict[str, Any]] = []
     confirmations: list[dict[str, Any]] = []
@@ -1102,9 +1103,9 @@ def run_downstream(
 ) -> dict[str, Any]:
     """Run the FTTH(4) sequence on artifacts from the current batch only."""
     requested_formal_infrastructure = bool(use_formal_infrastructure)
-    # A supplied formal INFRASTRUCTURE layer is project data, not an optional
-    # example.  It must participate in routing automatically.
-    use_formal_infrastructure = bool(topology.get("edges") or []) or requested_formal_infrastructure
+    # Recognition roads take precedence; formal infrastructure is a fallback,
+    # never silently added to a road-only routing policy.
+    use_formal_infrastructure = requested_formal_infrastructure and not use_recognition_roads
     if not use_formal_infrastructure and not use_recognition_roads:
         raise ValueError("任务六至少要显式选择一种经确认的道路来源")
     if formal_duct_capacity <= 0:

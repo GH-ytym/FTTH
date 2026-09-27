@@ -1,6 +1,5 @@
 """Real source data -> same API used by the plugin -> real algorithm -> export."""
 import json
-import csv
 import sys
 import time
 from pathlib import Path
@@ -9,34 +8,18 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.app import create_app
-from backend.settings import Settings, VENDOR
+from backend.settings import Settings
 from backend.service import write_json
 
 
 def main():
     source = ROOT.parent / "FTTH(4)/FTTH/Input/51IMB/Task1/final_data"
-    config = json.loads((VENDOR / "task1_config.json").read_text(encoding="utf-8-sig"))
-    # Use input_config_builder in the same QGIS environment as the plugin.
     settings = Settings()
-    spec_file = settings.data / "51imb-source.json"
-    output_config = settings.data / "51imb-config.json"
-    # 51IMB has a reduced source schema. Preserve actual columns; do not invent
-    # descriptive addresses/ownership fields required by the unrelated demo template.
-    for layer in config["vector_layers"]:
-        with (source / (layer["name"].lower() + ".csv")).open(encoding="utf-8-sig") as handle:
-            headers = next(csv.reader(handle))
-        layer["fields"] = [f for f in layer["fields"] if f["name"] in headers]
-    template = settings.data / "51imb-template.json"
-    write_json(template, config)
-    write_json(spec_file, {"template": str(template), "output": str(output_config), "sources": {name: {"path": str(source / (name.lower() + ".csv"))} for name in ("IMB", "SITE", "PTECH", "INFRASTRUCTURE")}})
-    import subprocess
-    proc = subprocess.run([str(settings.qgis_python), str(ROOT / "scripts/qgis_worker.py"), "build-config", str(spec_file)], env=settings.worker_env(), capture_output=True, text=True, encoding="utf-8")
-    print(proc.stdout, flush=True)
-    if proc.returncode:
-        raise RuntimeError(proc.stderr)
+    sources = {name: {"path": str(source / (name.lower() + ".csv"))}
+               for name in ("IMB", "SITE", "PTECH", "INFRASTRUCTURE")}
     with TestClient(create_app(settings)) as client:
         client.headers["Authorization"] = "Bearer " + settings.token
-        response = client.post("/projects", json={"name": "51IMB 回归", "config_path": str(output_config)})
+        response = client.post("/projects", json={"name": "51IMB 回归", "sources": sources})
         if response.status_code != 200:
             raise RuntimeError(response.text)
         project = response.json()

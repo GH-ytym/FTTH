@@ -13,7 +13,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import tool
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from . import credentials
 from .models import StrictModel
@@ -291,7 +291,12 @@ class Evidence:
             "parameters": self.run.get("parameters"), "scope": self.run.get("scope")}
 
     def enforce(self, result, accessed):
-        result = ReviewResult.model_validate(result)
+        if result is None:
+            raise ReviewError('missing_result', '审查模型未返回结构化结论（ReviewResult）；证据读取完成不代表审查完成。可补审，无需重跑规划。')
+        try:
+            result = ReviewResult.model_validate(result)
+        except ValidationError as exc:
+            raise ReviewError('invalid_structure', '审查模型返回的结论字段不符合 ReviewResult 格式。') from exc
         references = set(result.checked + result.repair_evidence_ids)
         for finding in result.findings:
             references.update(finding.evidence_ids)
@@ -448,14 +453,15 @@ class ReviewController:
                 try:
                     if progress:
                         progress("validate_result")
-                    return evidence.enforce(output["structured_response"], accessed)
-                except ReviewError:
+                    return evidence.enforce(output.get("structured_response"), accessed)
+                except ReviewError as exc:
                     errors[0] += 1
                     if errors[0] > 1:
                         raise
                     if progress:
                         progress("correct_result")
-                    messages = output["messages"] + [{"role": "user", "content": "证据引用无效，请纠正一次。checked、findings.evidence_ids、repair_evidence_ids 只能引用已读取 ID：" + json.dumps(sorted(accessed))}]
+                    reason = '证据引用无效' if exc.code == 'invalid_reference' else '未返回有效的 ReviewResult 结构化结论'
+                    messages = output["messages"] + [{"role": "user", "content": reason + "，请纠正一次：调用 ReviewResult 返回结论，不要只输出普通文本。checked、findings.evidence_ids、repair_evidence_ids 只能引用已读取 ID：" + json.dumps(sorted(accessed))}]
         return await asyncio.wait_for(invoke(), timeout=180)
 
     async def execute(self, review):

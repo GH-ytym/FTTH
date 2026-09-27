@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -25,10 +25,21 @@ class Parameters(StrictModel):
     use_recognition_roads: bool = False
 
 
+class DataSourceInput(StrictModel):
+    path: str = Field(min_length=1)
+    source_layer: str = ""
+
+
 class ProjectInput(StrictModel):
     name: str = "当前项目"
-    config_path: str
+    sources: dict[Literal["IMB", "SITE", "PTECH", "INFRASTRUCTURE"], DataSourceInput]
     recognition_path: str | None = None
+
+    @model_validator(mode="after")
+    def require_demand(self):
+        if "IMB" not in self.sources:
+            raise ValueError("请选择 IMB 需求数据")
+        return self
 
 
 class SessionInput(StrictModel):

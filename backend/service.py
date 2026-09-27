@@ -165,16 +165,10 @@ class Service:
     async def register(self, spec):
         directory = self.settings.data / "projects" / uid("project")
         directory.mkdir(parents=True)
-        source_config = Path(spec.config_path).resolve(strict=True)
-        config = read_json(source_config)
         hashes = {}
-        for i, layer in enumerate(config.get("vector_layers", [])):
-            if layer.get("source_type") == "empty":
-                continue
-            source = Path(layer["source"])
-            if not source.is_absolute():
-                source = source_config.parent / source
-            source = source.resolve(strict=True)
+        sources = {}
+        for i, (name, selected) in enumerate(spec.sources.items()):
+            source = Path(selected.path).expanduser().resolve(strict=True)
             dest = directory / "sources" / str(i)
             dest.mkdir(parents=True)
             files = [source.with_suffix(ext) for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix")] if source.suffix.lower() == ".shp" else [source]
@@ -183,11 +177,18 @@ class Service:
                     target = dest / file.name
                     shutil.copy2(file, target)
                     hashes[str(target.relative_to(directory))] = hashlib.sha256(target.read_bytes()).hexdigest()
-            layer["source"] = str(dest / source.name)
+            sources[name] = {"path": str(dest / source.name), "source_layer": selected.source_layer}
+        config_path = directory / "config.json"
+        source_spec = directory / "sources.json"
+        write_json(source_spec, {"sources": sources, "output": str(config_path)})
+        code, output = await self.process([str(ROOT / "scripts/qgis_worker.py"), "build-config", str(source_spec)], directory / "build.log")
+        built = parse_result(output, "DEMO_RESULT=")
+        if code or built.get("status") != "success":
+            raise ValueError("；".join(built.get("errors", ["无法识别所选数据的字段"])))
+        config = read_json(config_path)
         config["rasters"] = []
         config["output"].update(quality_report=str(directory / "quality.json"), geopackage=str(directory / "base.gpkg"), add_to_project=False, capture_screenshot=False)
         config["task2_topology"]["output_json"] = str(directory / "topology.json")
-        config_path = directory / "config.json"
         write_json(config_path, config)
         hashes["config.json"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
         recognition = None
@@ -195,7 +196,10 @@ class Service:
             recognition = str(directory / "recognition.gpkg")
             shutil.copy2(Path(spec.recognition_path).resolve(strict=True), recognition)
             hashes["recognition.gpkg"] = hashlib.sha256(Path(recognition).read_bytes()).hexdigest()
-        code, output = await self.process([str(ROOT / "scripts/qgis_worker.py"), "inspect", str(config_path)], directory / "inspect.log")
+        command = [str(ROOT / "scripts/qgis_worker.py"), "inspect", str(config_path)]
+        if recognition:
+            command.append(recognition)
+        code, output = await self.process(command, directory / "inspect.log")
         summary = parse_result(output, "DEMO_RESULT=")
         if code or summary.get("status") != "success":
             raise ValueError("；".join(summary.get("errors", ["数据登记失败"])))
@@ -222,7 +226,13 @@ class Service:
         if not session.get("project_id"):
             return {"project_id": None, "error": "尚未登记项目数据，可先对话；执行规划前请在数据页登记输入。"}
         project = self.store.get("project", session["project_id"])
-        return {"project_id": project["id"], "name": project["name"], **project["summary"]}
+        inputs = {}
+        if project.get("config_path"):
+            config = read_json(Path(project["config_path"]))
+            inputs = {layer["name"]: {"path": layer.get("source", ""), "source_layer": layer.get("source_layer", "")}
+                      for layer in config.get("vector_layers", []) if layer.get("source_type") != "empty"}
+        return {"project_id": project["id"], "name": project["name"], **project["summary"],
+                "recognition_path": project.get("recognition_path"), "inputs": inputs}
 
     def resolve(self, session_id, request):
         session = self.store.get("session", session_id)

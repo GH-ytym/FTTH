@@ -1,6 +1,8 @@
-# Compatibility wrapper; the cross-platform entry point is `uv run ftth serve`.
-param([int]$Port = 8765)
+# Read the repository's local .env; an explicit port overrides it.
+param([int]$Port = 0)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath (Split-Path $PSScriptRoot -Parent)
-uv run ftth serve --port $Port
+$cli = @()
+if ($Port) { $cli += @('--port', $Port) }
+uv run --frozen python -X utf8 scripts/start_backend.py @cli
 exit $LASTEXITCODE

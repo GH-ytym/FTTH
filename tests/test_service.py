@@ -11,6 +11,49 @@ from backend.settings import Settings
 from backend.store import Store
 
 
+def test_project_input_accepts_individual_sources_not_config_files():
+    from backend.models import ProjectInput
+    from pydantic import ValidationError
+    assert ProjectInput(sources={"IMB": {"path": "IMB.shp"}}).sources['IMB'].path == 'IMB.shp'
+    for payload in ({'config_path': 'config.json'}, {'sources': {}},
+                    {'sources': {'IMB': {'path': 'IMB.shp'}}, 'config_path': 'config.json'}):
+        with pytest.raises(ValidationError):
+            ProjectInput.model_validate(payload)
+
+
+def test_registration_generates_config_from_snapshotted_sources(tmp_path):
+    import json
+    from backend.models import ProjectInput
+    source = tmp_path / 'IMB.csv'
+    source.write_text('CODE,X,Y,NB_LOC_TOT\nI,1,2,3\n', encoding='utf-8')
+    service, _, _ = setup_service(tmp_path)
+    commands = []
+
+    async def worker(command, log):
+        commands.append(command)
+        if command[1] == 'build-config':
+            spec = json.loads(Path(command[2]).read_text(encoding='utf-8'))
+            snapshot = Path(spec['sources']['IMB']['path'])
+            assert snapshot != source and snapshot.read_bytes() == source.read_bytes()
+            config = {'vector_layers': [{'name': 'IMB', 'source': str(snapshot), 'source_type': 'csv_xy'}],
+                      'output': {}, 'task2_topology': {}}
+            Path(spec['output']).write_text(json.dumps(config), encoding='utf-8')
+        return 0, 'DEMO_RESULT=' + json.dumps({'status': 'success', 'imb_count': 1})
+
+    async def scenario():
+        service.process = worker
+        project = await service.register(ProjectInput(sources={'IMB': {'path': str(source)}}))
+        sid = service.session(project['id'])['id']
+        view = service.inspect(sid)
+        assert 'config_path' not in view
+        assert view['inputs']['IMB']['path'] != str(source)
+        service.verify_snapshot(project)
+        assert [c[1] for c in commands] == ['build-config', 'inspect']
+        await service.close()
+    from pathlib import Path
+    asyncio.run(scenario())
+
+
 def setup_service(tmp_path):
     settings = Settings(tmp_path)
     store = Store(tmp_path / "test.sqlite")
@@ -19,6 +62,21 @@ def setup_service(tmp_path):
         "summary": {"imb_count": 3, "nro_count": 1, "oversized_imbs": [], "infrastructure_count": 3}})
     a, b = service.session("p")["id"], service.session("p")["id"]
     return service, a, b
+
+
+def test_empty_infra_requires_registered_roads_and_inspection_exposes_binding(tmp_path):
+    service, sid, _ = setup_service(tmp_path)
+    project = service.store.get('project', 'p')
+    project['summary']['infrastructure_count'] = 0
+    service.store.put('project', project)
+    spec = RunInput(request_id='preflight', scope='full', parameter_overrides={
+        'use_recognition_roads': True, 'split_oversized_imbs': True})
+    assert not service.validate(sid, spec)['valid']
+    assert service.inspect(sid)['recognition_path'] is None
+    project['recognition_path'] = 'roads.gpkg'
+    service.store.put('project', project)
+    assert service.validate(sid, spec)['valid']
+    assert service.inspect(sid)['recognition_path'] == 'roads.gpkg'
 
 
 def use_host_python(service):
