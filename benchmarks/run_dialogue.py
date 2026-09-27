@@ -118,7 +118,7 @@ async def run_case(case, architecture, smoke, model=None):
             project_id = 'synthetic' if case['project'] else None
             if project_id:
                 service.store.put('project', {'id':project_id, 'name':'benchmark synthetic fixture',
-                    'recognition_path':None, 'summary':{'imb_count':51,'nro_count':1,
+                    'recognition_path':None, 'summary':{'rule_preflight':{'version':'ftth-input-preflight-v1','status':'PASS','results':[]},'imb_count':51,'nro_count':1,
                     'infrastructure_count':193,'oversized_imbs':[], 'total_ports':1018,
                     'crs':'EPSG:4326','synthetic':True}})
             sid = service.session(project_id)['id']

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import uuid
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 from qgis.PyQt.QtCore import QTimer, QUrl, QByteArray, QSettings
 from qgis.PyQt.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from qgis.PyQt.QtGui import QFont, QFontDatabase
-from qgis.PyQt.QtWidgets import QWidget, QFileDialog, QCheckBox
+from qgis.PyQt.QtWidgets import QWidget, QFileDialog
 from qgis.core import QgsVectorFileWriter, QgsProject
 BUSINESS_LAYERS = ("IMB", "SITE", "PTECH", "INFRASTRUCTURE")
 from .display import show_result
@@ -64,6 +65,17 @@ class Panel(QWidget):
         self.replies = set()
         self.data_dirty = False
         self.data_revision = 0
+        self.server_revision = 0
+        self.loading_data = False
+        self.saving_data = False
+        self.after_save = []
+        self.result_target = None
+        self.report_generation = 0
+        self.review_versions = {}
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.setInterval(500)
+        self.save_timer.timeout.connect(self.flush_data)
         build_ui(self, BUSINESS_LAYERS)
         for widget in [*self.sources.values(), *self.sublayers.values(), self.recognition]:
             widget.textChanged.connect(self.data_changed)
@@ -74,6 +86,11 @@ class Panel(QWidget):
         self.run_cache = {}
 
     def home(self):
+        if self.data_dirty or self.saving_data:
+            self.flush_data(self.home)
+            return
+        self.load_data_form({}, "")
+        self.server_revision = 0
         self.view_generation += 1
         self.run_entries = None
         self.loading_history = False
@@ -95,7 +112,11 @@ class Panel(QWidget):
             self.home()
 
     def refresh_sessions(self, items):
+        unchanged = self.sessions_cache == items
         self.sessions_cache = items
+        self.history_popup.refresh()
+        if unchanged:
+            return
         current = next((s for s in items if s["id"] == self.session), None)
         if current:
             self.title_button.setText(current.get("title", "新对话"))
@@ -105,30 +126,34 @@ class Panel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         from .fluent_ui import TransparentPushButton
-        for session in items if self.show_all_sessions else items[:3]:
+        for session in items[:3]:
             b = TransparentPushButton(session.get("title", "新对话"), self.recent)
             b.setStyleSheet("QPushButton {text-align:left;border:none;background:transparent;color:#56616f;padding:6px;} QPushButton:hover, QPushButton:pressed {background:#FFFFFF;border-radius:6px;}")
             hover_feedback(b)
             b.clicked.connect(lambda checked=False, s=session: self.open_session(s))
             self.recent_layout.addWidget(b)
-        if len(items) > 3 and not self.show_all_sessions:
+        if len(items) > 3:
             b = TransparentPushButton(f"查看全部 ({len(items)})", self.recent)
             hover_feedback(b)
+            self.all_sessions_button = b
             b.clicked.connect(self.all_sessions)
             self.recent_layout.addWidget(b)
 
     def all_sessions(self):
-        self.show_all_sessions = True
-        self.refresh_sessions(self.sessions_cache)
+        self.history_popup.refresh()
+        self.history_popup.present(self.all_sessions_button)
 
     def open_session(self, session):
+        if self.data_dirty or self.saving_data:
+            self.flush_data(lambda: self.open_session(session))
+            return
         self.view_generation += 1
         self.run_entries = None
         generation = self.view_generation
         self.session = session["id"]
         self.session_project = session.get("project_id")
-        self.data_dirty = True
-        self.data_status.setText("正在读取当前会话已登记的数据…")
+        self.loading_data = True
+        self.data_status.setText("正在读取数据草稿…")
         self.project_id = self.session_project
         self.title_button.setText(session.get("title", "新对话"))
         self.title_button.setToolTip(session.get("title", "新对话"))
@@ -142,7 +167,6 @@ class Panel(QWidget):
         def loaded(value):
             if sid != self.session or generation != self.view_generation:
                 return
-            self.apply_policy(value["session"].get("policy", {}))
             if 'timeline' in value:
                 self.render_events(value['timeline'])
                 for workflow in value.get('workflows', []):
@@ -153,6 +177,9 @@ class Panel(QWidget):
                     if message['id'] not in self.transcript.workflow_messages:
                         self.transcript.reply(message['id'], message.get('response', message.get('partial_response', '')),
                             message['status'], message.get('elapsed_seconds'))
+                for message in value['messages']:
+                    if message.get('run_id') and message.get('notification'):
+                        self.add_result_link(message['id'], 'run', message['run_id'])
                 self.cursor = value['cursor']
                 self.loading_history = False
                 return
@@ -184,72 +211,116 @@ class Panel(QWidget):
         def data_loaded(value):
             if sid != self.session or generation != self.view_generation or revision != self.data_revision:
                 return
-            self.load_data_form(value.get("inputs", {}), value.get("recognition_path") or "")
+            self.load_data_form(value.get("sources", {}), value.get("recognition_path") or "")
             self.data_dirty = False
-            self.data_status.setText("当前会话已登记道路 GPKG" if value.get("recognition_path") else "当前会话未登记道路 GPKG；可使用有数据的 INFRA 兜底")
-        self.api("GET", self.route("project"), callback=data_loaded)
+            self.server_revision = value["revision"]
+            self.loading_data = False
+            self.data_status.setText("已保存")
+            pending = self.settings.value('pending_data/' + sid, '')
+            if pending:
+                draft = json.loads(pending)
+                if draft['sources'] == value['sources'] and (draft.get('recognition_path') or '') == (value.get('recognition_path') or ''):
+                    self.settings.remove('pending_data/' + sid)
+                    return
+                self.load_data_form(draft['sources'], draft.get('recognition_path') or '')
+                self.server_revision = draft['revision']
+                self.data_dirty = True
+                self.flush_data()
+        self.api("GET", self.route("data"), callback=data_loaded)
 
     def data_changed(self, *args):
+        if self.loading_data:
+            return
         self.data_dirty = True
         self.data_revision += 1
-        self.data_status.setText("输入已修改，尚未登记。请点击“登记数据 · 新建会话”后再规划。")
+        self.data_status.setText("等待保存…")
+        self.settings.setValue('pending_data/' + (self.session or 'new'), json.dumps({'revision': self.server_revision, 'sources': self.form_inputs(), 'recognition_path': self.recognition.text()}, ensure_ascii=False))
+        self.settings.sync()
+        self.save_timer.start()
 
     def load_data_form(self, inputs, recognition):
+        self.loading_data = True
         for name in BUSINESS_LAYERS:
             item = inputs.get(name, {})
             self.sources[name].setText(item.get("path", ""))
-            self.sublayers[name].setText(item.get("source_layer", ""))
+            self.sublayers[name].setText(item.get("source_layer") or "")
         self.recognition.setText(recognition)
+        self.loading_data = False
 
     def form_inputs(self):
-        return {n: {"path": self.sources[n].text().strip(), "source_layer": self.sublayers[n].text().strip()} for n in BUSINESS_LAYERS}
+        return {n: {"path": self.sources[n].text().strip(), "source_layer": self.sublayers[n].text().strip()}
+            for n in BUSINESS_LAYERS if self.sources[n].text().strip()}
 
-    def data_ready(self):
-        if self.data_dirty:
-            self.status.setText("输入尚未登记，请先在数据页点击“登记数据 · 新建会话”。")
-            return False
-        return True
-
-    def registered_project(self, project, origin_sid, origin_project, generation, revision):
-        if origin_sid and not origin_project:
-            def bound(value):
-                if origin_sid == self.session and generation == self.view_generation:
-                    self.project_id = project["id"]
-                    self.session_project = project["id"]
-                    if revision != self.data_revision:
-                        self.status.setText("已登记提交时的数据；随后修改的输入仍需重新登记。")
-                        return
-                    self.tabs.setCurrentIndex(0)
-                    self.status.setText("项目数据已登记")
-                    self.data_dirty = False
-                    self.data_status.setText("当前会话已登记道路 GPKG" if project.get("recognition_path") else "已登记；未提供道路 GPKG")
-            self.api("POST", "/sessions/" + origin_sid + "/project", {"project_id": project["id"]}, bound)
-        else:
-            # Keep a registered project reachable even if the user navigated away.
-            def created(session):
-                self.last_sessions_refresh = 0
-                if generation == self.view_generation and revision == self.data_revision:
-                    self.open_session(session)
-                    self.status.setText("项目数据已登记")
-            self.api("POST", "/sessions", {"project_id": project["id"]}, created)
-
-    def registration_callback(self):
-        sid, project, generation = self.session, self.session_project, self.view_generation
-        revision = self.data_revision
-        return lambda value: self.registered_project(value, sid, project, generation, revision)
-
-    def apply_policy(self, policy):
-        for name in ("use_formal_infrastructure", "use_recognition_roads", "split_oversized_imbs"):
-            self.controls[name].setChecked(policy.get(name, False))
-
-    def save_policy(self):
-        if not self.session or not self.session_project:
-            self.status.setText("请先为当前会话登记数据")
+    def show_data(self):
+        if self.loading_data:
+            self.status.setText('数据正在读取，请稍候；失败时请重新打开对话。')
             return
+        if not self.session and not self.data_dirty:
+            pending = self.settings.value('pending_data/new', '')
+            if pending:
+                draft = json.loads(pending)
+                self.load_data_form(draft['sources'], draft.get('recognition_path') or '')
+                self.data_dirty = True
+                self.flush_data()
+        self.data_popup.present(self.attach_button, above=True)
+
+    def clear_source(self, name):
+        if name == 'roads':
+            self.recognition.clear()
+        else:
+            self.sources[name].clear()
+            self.sublayers[name].clear()
+        self.flush_data()
+
+    def flush_data(self, then=None):
+        if callable(then):
+            self.after_save.append(then)
+        self.save_timer.stop()
+        if self.saving_data:
+            return
+        if self.loading_data:
+            self.data_status.setText("草稿尚未加载，不能使用旧数据发送请求")
+            self.after_save.clear()
+            return
+        if not self.data_dirty:
+            callbacks, self.after_save = self.after_save, []
+            for callback in callbacks:
+                callback()
+            return
+        self.saving_data = True
+        self.data_status.setText("保存中…")
+        def failed(error):
+            self.saving_data = False
+            self.after_save.clear()
+            self.data_status.setText("保存失败：" + str(error) + "；未发送请求。")
+        if not self.session:
+            def created(session):
+                self.session = session['id']
+                self.server_revision = 0
+                self.saving_data = False
+                self.last_sessions_refresh = 0
+                self.flush_data()
+            self.api('POST', '/sessions', {}, created, quiet=True, on_error=failed)
+            return
+        revision = self.data_revision
         sid = self.session
-        payload = {n: self.controls[n].isChecked() for n in ("use_formal_infrastructure", "use_recognition_roads", "split_oversized_imbs")}
-        self.api("POST", self.route("policy"), payload,
-            lambda value: self.status.setText("本会话工程策略已保存") if sid == self.session else None)
+        payload = {'revision': self.server_revision, 'sources': self.form_inputs(), 'recognition_path': self.recognition.text().strip() or None}
+        def saved(value):
+            self.saving_data = False
+            if sid != self.session:
+                return
+            self.server_revision = value['revision']
+            if revision == self.data_revision:
+                self.settings.remove('pending_data/' + sid)
+                self.settings.remove('pending_data/new')
+                self.settings.sync()
+            self.data_dirty = revision != self.data_revision
+            if self.data_dirty:
+                self.settings.setValue('pending_data/' + sid, json.dumps({'revision': self.server_revision, 'sources': self.form_inputs(), 'recognition_path': self.recognition.text()}, ensure_ascii=False))
+                self.settings.sync()
+            self.data_status.setText('等待保存…' if self.data_dirty else '已保存')
+            self.flush_data()
+        self.api('POST', self.route('data'), payload, saved, quiet=True, on_error=failed)
 
     def button(self, text, callback):
         return button(text, callback)
@@ -257,9 +328,9 @@ class Panel(QWidget):
     def route(self, suffix):
         return "/sessions/" + self.session + "/" + suffix
 
-    def api(self, method, path, payload=None, callback=None, quiet=False):
+    def api(self, method, path, payload=None, callback=None, quiet=False, on_error=None, deduplicate=True):
         request_key = (method, path)
-        if request_key in self.busy:
+        if deduplicate and request_key in self.busy:
             if not quiet:
                 self.status.setText("相同请求正在处理，请等待完成。")
             return
@@ -287,6 +358,8 @@ class Panel(QWidget):
                     self.creating_session = False
                 if path.endswith("/history"):
                     self.loading_history = False
+                if on_error:
+                    on_error(exc)
                 self.status.setText(str(exc))
                 if path == "/projects":
                     self.data_status.setText("登记失败：" + str(exc))
@@ -312,11 +385,14 @@ class Panel(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "选择 " + name, "", "GIS / 表格 (*.shp *.gpkg *.geojson *.csv *.xlsx)")
         if path:
             self.sources[name].setText(path)
+            self.sublayers[name].clear()
+            self.flush_data()
 
     def browse_recognition(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择识别结果", "", "GeoPackage (*.gpkg)")
         if path:
             self.recognition.setText(path)
+            self.flush_data()
 
     def current_layer(self, name):
         try:
@@ -333,96 +409,117 @@ class Panel(QWidget):
                 raise ValueError(str(result))
             self.sources[name].setText(str(path))
             self.sublayers[name].setText(name)
+            self.flush_data()
             self.status.setText("已保存所选要素快照" if options.onlySelectedFeatures else "已保存当前图层全部要素快照")
         except Exception as exc:
             self.status.setText(str(exc))
 
-    def register(self):
-        inputs = {name: value for name, value in self.form_inputs().items() if value["path"]}
-        if "IMB" not in inputs:
-            self.data_status.setText("请选择 IMB 需求数据")
-            return
-        self.api("POST", "/projects", {
-            "name": QgsProject.instance().title() or "QGIS项目",
-            "sources": inputs,
-            "recognition_path": self.recognition.text().strip() or None,
-        }, self.registration_callback())
 
     def send(self):
-        if not self.data_ready():
-            return
         text = self.message.text().strip()
         if not text or self.creating_session:
             return
-        if self.backend_compatible is False:
-            self.status.setText("后端尚不支持自然语言执行授权：停止旧后端，再在原终端运行 scripts/start_qwen.ps1")
-            return
-        allow_auto_repair = self.auto_repair.isChecked()
+        self.flush_data(lambda: self.send_saved(text))
+
+    def send_saved(self, text):
         if not self.session:
             self.creating_session = True
-            generation = self.view_generation
             def opened(session):
                 self.creating_session = False
-                if generation == self.view_generation:
-                    self.open_session(session)
-                self.submit_message(session["id"], text, allow_auto_repair)
-            self.api("POST", "/sessions", {"project_id": self.project_id}, opened)
-            return
-        self.submit_message(self.session, text, allow_auto_repair)
+                self.session = session['id']
+                self.server_revision = 0
+                self.submit_message(self.session, text)
+            self.api('POST', '/sessions', {}, opened)
+        else:
+            self.submit_message(self.session, text)
 
-    def submit_message(self, sid, text, allow_auto_repair=False):
+    def submit_message(self, sid, text):
         route = "/sessions/" + sid + "/messages"
-        if ("POST", route) in self.busy:
-            return
         def accepted(value):
-            if sid == self.session and self.message.text().strip() == text:
-                self.message.clear()
+            if sid == self.session:
+                self.recent.hide()
+                self.back_button.show()
+                if self.message.text().strip() == text:
+                    self.message.clear()
             self.last_sessions_refresh = 0
-        self.api("POST", route, {"request_id": request_id(), "content": text,
-            "allow_auto_repair": allow_auto_repair}, accepted)
+        self.api("POST", route, {"request_id": request_id(), "content": text}, accepted)
 
-    def manual(self, execute):
-        if not self.data_ready():
+    def add_result_link(self, mid, kind, identifier):
+        card = self.transcript.replies.get(mid)
+        if card is None or hasattr(card, 'result_button'):
             return
-        if not self.session:
-            self.status.setText("请先登记数据")
-            return
-        values = {n: c.isChecked() if isinstance(c, QCheckBox) else c.value() for n, c in self.controls.items()}
-        self.api("POST", self.route("runs" if execute else "validate"), {"request_id": request_id(), "scope": self.scope.currentData(), "parameter_overrides": values,
-            "allow_auto_repair": bool(execute and self.manual_auto_repair.isChecked())}, self.report)
+        sid = self.session
+        card.result_button = button('查看结果', lambda: self.show_result_page(sid, kind, identifier))
+        card.layout().addWidget(card.result_button)
 
-    def review_report(self):
-        if self.runs.currentData():
-            sid = self.session
-            def show(reviews):
-                if sid != self.session:
-                    return
+    def show_result_page(self, sid, kind, identifier):
+        self.result_target = (sid, kind, identifier)
+        self.result_title.setText(identifier)
+        self.tabs.setCurrentIndex(1)
+        self.open_result_report(False)
+
+    def open_result_report(self, review=False):
+        if not self.result_target:
+            return
+        self.report_generation += 1
+        generation = self.report_generation
+        target = self.result_target
+        sid, kind, identifier = target
+        if kind == 'check' and review:
+            self.report_box.setPlainText('本次仅检查数据，未执行独立审查')
+            return
+        self.report_box.setPlainText('正在读取报告…')
+        def loaded(value):
+            if self.result_target != target or generation != self.report_generation:
+                return
+            if review:
                 from .review_view import render_reviews
-                self.report_box.setPlainText(render_reviews(reviews))
-                self.tabs.setCurrentIndex(2)
-            self.api("GET", self.route("runs/" + self.runs.currentData() + "/reviews"), callback=show)
+                text = render_reviews(value)
+            else:
+                text = json.dumps(value, ensure_ascii=False, indent=2)
+            self.report_box.setPlainText(text)
+        self.api('GET', f'/sessions/{sid}/' + ('checks/' if kind == 'check' else 'runs/') + identifier + ('/reviews' if review else ''), callback=loaded, quiet=True, deduplicate=False)
 
-    def request_review(self):
-        if self.runs.currentData():
-            self.api("POST", self.route("runs/" + self.runs.currentData() + "/reviews"), {"request_id": request_id()}, self.report)
+    def publish_qgis_state(self):
+        project = QgsProject.instance()
+        for group in reversed(project.layerTreeRoot().children()):
+            name = group.name()
+            if not name.startswith('FTTH demo0 run_') or not hasattr(group, 'findLayers'):
+                continue
+            rid = name.removeprefix('FTTH demo0 ')
+            if rid not in self.run_cache:
+                continue
+            rows = []
+            for node in group.findLayers():
+                layer = node.layer()
+                if layer is not None:
+                    rows.append({'name': layer.name(), 'valid': layer.isValid(), 'modified': layer.isModified(),
+                        'crs': layer.crs().authid(), 'count': layer.featureCount(),
+                        'source_hash': hashlib.sha256(os.path.normcase(os.path.abspath(layer.source().split('|')[0])).encode('utf-8')).hexdigest()})
+            self.api('POST', self.route('qgis-state'), {'run_id': rid, 'project_crs': project.crs().authid(), 'layers': rows}, quiet=True)
+            break
 
     def review_event(self, event):
         summary = event.get("summary", {})
+        stamp = summary.get('updated', event.get('id', 0))
+        if stamp < self.review_versions.get(event['review_id'], -1):
+            return
+        self.review_versions[event['review_id']] = stamp
         state = event["status"]
-        label = {"queued": "排队", "running": "读取证据与独立审查", "completed": "已完成", "failed": "失败", "interrupted": "中断", "skipped": "未执行"}.get(state, state)
+        label = {"queued": "排队", "running": "读取证据与独立审查", "completed": "已完成", "failed": "审查暂未完成", "interrupted": "中断", "skipped": "未执行"}.get(state, state)
         if state == "running":
-            label = {"evidence": "整理审查证据", "model_review": "分析证据与形成结论", "read_evidence": "读取证据", "correct_result": "纠正审查格式或引用", "validate_result": "校验结论与证据引用", "verify": "复核证据完整性", "repair_gate": "校验一次重算条件", "compare": "比较重算前后结果"}.get(summary.get("stage"), label)
+            label = {"evidence": "整理审查证据", "model_review": "分析证据与形成结论", "read_evidence": "读取证据", "correct_result": "纠正审查格式或引用", "validate_result": "校验结论与证据引用", "verify": "复核证据完整性", "rule_checks": "执行工作簿与 QGIS 校验工具"}.get(summary.get("stage"), label)
             names = {"run": "运行参数", "input": "输入快照", "execution": "执行状态", "task2": "分区", "task3": "选址优化", "task4_placement": "PBO 选址", "task4_clusters": "BPE 聚类", "task4_partition": "分区归属", "task6": "管网", "task5": "光缆", "task5_artifact": "光缆校验", "handoff": "任务交接", "fields": "字段校验", "failure": "失败报告"}
             ids = summary.get("active_evidence_ids", [])
             if ids:
                 label += "：" + "、".join(names.get(name, "报告") for name in ids[:2]) + (f"等 {len(ids)} 项" if len(ids) > 2 else "")
         verdict = (summary.get("result") or {}).get("verdict")
         if verdict:
-            label += " · " + {"pass": "通过（非工程验收）", "fail": "未通过", "needs_review": "需要复核", "insufficient_evidence": "证据不足"}.get(verdict, verdict)
+            label += " · " + {"pass": "通过（非工程验收）", "fail": "未通过", "needs_review": "有待复核事项", "insufficient_evidence": "证据不足"}.get(verdict, verdict)
         self.transcript.activity(event["review_id"], label,
             "running" if state in {"queued", "running"} else state if state in {"failed", "interrupted"} else "succeeded",
             None if state in {"queued", "running"} else summary.get("elapsed_seconds"),
-            role="service" if state == "running" and summary.get("stage") in {"evidence", "validate_result", "verify", "repair_gate", "compare"} else "review")
+            role="service" if state == "running" and summary.get("stage") in {"evidence", "validate_result", "verify", "rule_checks"} else "review")
 
     def workflow_event(self, workflow):
         sid = workflow['session_id']
@@ -488,35 +585,12 @@ class Panel(QWidget):
 
     def report(self, value):
         self.report_box.setPlainText(json.dumps(value, ensure_ascii=False, indent=2))
-        self.tabs.setCurrentIndex(2)
 
-    def run_report(self):
-        if self.runs.currentData():
-            self.api("GET", self.route("runs/" + self.runs.currentData()), callback=self.report)
 
-    def load_parameters(self):
-        run = self.run_cache.get(self.runs.currentData(), {})
-        for name, value in run.get("parameters", {}).items():
-            control = self.controls[name]
-            control.setChecked(value) if isinstance(control, QCheckBox) else control.setValue(value)
-        self.scope.setCurrentIndex(max(0, self.scope.findData(run.get("scope"))))
-        self.tabs.setCurrentIndex(1)
 
-    def display(self):
-        if self.runs.currentData():
-            self.api("POST", self.route("display"), {"run_id": self.runs.currentData()}, self.report)
 
-    def cancel(self):
-        if self.runs.currentData():
-            self.api("POST", self.route("runs/" + self.runs.currentData() + "/cancel"), callback=self.report)
 
-    def export(self):
-        if self.runs.currentData():
-            self.api("POST", self.route("exports"), {"request_id": request_id(), "run_id": self.runs.currentData()}, self.report)
 
-    def compare(self):
-        if self.runs.currentData() and self.compare_to.currentData():
-            self.api("GET", self.route("compare") + "?left=" + self.runs.currentData() + "&right=" + self.compare_to.currentData(), callback=self.report)
 
     def render_events(self, items):
         for item in items:
@@ -542,12 +616,22 @@ class Panel(QWidget):
                 self.transcript.activity(item["run_id"], run_activity_text(item["status"]), "running" if item["status"] in ("running", "queued") else item["status"], item.get("elapsed_seconds"), role="algorithm")
             elif item["type"] == "review":
                 self.review_event(item)
+            elif item['type'] == 'check':
+                record = item['check']
+                mid = 'check_' + record['id']
+                self.transcript.reply(mid, '数据检查' + ('完成' if record['status'] == 'succeeded' else '未通过') + ' · ' + record['id'] + ' · 数据版本 ' + str(record['data_revision']), 'succeeded')
+                self.add_result_link(mid, 'check', record['id'])
             elif item["type"] == "assistant":
                 if item['message_id'] in self.transcript.workflow_messages:
                     continue
                 # A final reply is already a message; it needs no extra
                 # zero-second actor row of its own.
                 self.transcript.reply(item["message_id"], str(item["text"]), item.get("status", "succeeded"), item.get("elapsed_seconds"))
+                ref = item.get('result_ref')
+                if ref:
+                    self.add_result_link(item['message_id'], ref['kind'], ref['id'])
+                elif item.get('run_id'):
+                    self.add_result_link(item['message_id'], 'run', item['run_id'])
             elif item["type"] == "assistant_stream":
                 self.transcript.reply(item["message_id"], item["text"], "running")
             elif item["type"] == "progress":
@@ -589,17 +673,6 @@ class Panel(QWidget):
             if sid != self.session:
                 return
             self.run_cache = {r["id"]: r for r in items}
-            entries = [(r["id"], r["status"]) for r in items]
-            if entries == self.run_entries:
-                return  # Rebuilding every second would close an open dropdown.
-            self.run_entries = entries
-            for combo in (self.runs, self.compare_to):
-                previous = combo.currentData()
-                combo.clear()
-                for r in reversed(items):
-                    combo.addItem(r["id"] + " · " + {"queued":"排队中", "running":"运行中", "succeeded":"已完成", "failed":"失败", "cancelled":"已取消", "interrupted":"已中断"}.get(r["status"], r["status"]), userData=r["id"])
-                if previous:
-                    combo.setCurrentIndex(max(0, combo.findData(previous)))
         def displays(items):
             if sid != self.session:
                 return
@@ -615,8 +688,11 @@ class Panel(QWidget):
             self.last_runs_refresh = time.monotonic()
             self.api("GET", self.route("runs"), callback=runs, quiet=True)
             self.api("GET", self.route("display"), callback=displays, quiet=True)
+            self.publish_qgis_state()
 
     def shutdown(self):
+        self.flush_data()
+        self.save_timer.stop()
         self.timer.stop()
         for reply in list(self.replies):
             reply.abort()

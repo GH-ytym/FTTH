@@ -59,7 +59,7 @@ def setup_service(tmp_path):
     store = Store(tmp_path / "test.sqlite")
     service = Service(settings, store)
     store.put("project", {"id": "p", "name": "test", "recognition_path": None,
-        "summary": {"imb_count": 3, "nro_count": 1, "oversized_imbs": [], "infrastructure_count": 3}})
+        "summary": {"rule_preflight": {"version":"ftth-input-preflight-v1", "status":"PASS", "results":[]}, "imb_count": 3, "nro_count": 1, "oversized_imbs": [], "infrastructure_count": 3}})
     a, b = service.session("p")["id"], service.session("p")["id"]
     return service, a, b
 
@@ -101,25 +101,18 @@ def test_export_summary_keeps_delivery_evidence(tmp_path):
     assert summary["task6_route_filter"]["raw_count"] == 64
 
 
-def test_full_requires_explicit_split_policy_even_without_oversized_imbs(tmp_path):
+def test_full_enables_split_by_default_without_manual_policy(tmp_path):
     service, sid, _ = setup_service(tmp_path)
-    spec = RunInput(request_id="no-policy", scope="full",
-        parameter_overrides={"use_formal_infrastructure": True})
-    checked = service.validate(sid, spec)
-    assert not checked["valid"]
-    assert any("split_oversized_imbs=true" in e for e in checked["errors"])
-    with pytest.raises(ValueError, match="split_oversized_imbs=true"):
-        service.submit(sid, spec)
-    assert service.store.all("run") == []
-    spec.parameter_overrides["split_oversized_imbs"] = True
+    spec = RunInput(request_id="defaults", scope="full")
     assert service.validate(sid, spec)["valid"]
-    assert service.validate(sid, RunInput(request_id="partition", scope="partition"))["valid"]
+    _, _, params = service.resolve(sid, spec)
+    assert params['split_oversized_imbs'] and params['ga_refine']
 
 
 def test_validation_and_ownership(tmp_path):
     service, a, b = setup_service(tmp_path)
     assert service.validate(a, RunInput(request_id="x", scope="partition"))["valid"]
-    assert not service.validate(a, RunInput(request_id="x"))["valid"]
+    assert service.validate(a, RunInput(request_id="x"))["valid"]
     project = service.store.get("project", "p")
     project["summary"]["nro_count"] = 0
     service.store.put("project", project)

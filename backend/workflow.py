@@ -19,7 +19,7 @@ logger = logging.getLogger("ftth.workflow")
 
 
 class Intent(StrictModel):
-    action: Literal['plan', 'query', 'discuss', 'export', 'display', 'compare', 'cancel', 'clarify']
+    action: Literal['plan', 'query', 'discuss', 'export', 'display', 'compare', 'cancel', 'review', 'clarify']
     scope: Literal['full', 'partition'] | None = None
     base_run_id: str | None = None
     other_run_id: str | None = None
@@ -45,7 +45,7 @@ purpose 指明原请求要只读讨论(read_only)、执行(execute)或尚不明�
 只读任务的补充回答不能变成执行。如果用户后来明确说“现在运行”，作为新的执行任务处理 continue_task=false；新任务可以按用户指代沿用原参数。
 明确要求执行规划即 action=plan，不能因已有成果而改为 query。
 明确要求导出已有结果即 action=export；“导出上次结果”可用 use_latest=true。明确请求本身就是本轮授权，不要求用户切换模式或再确认运行。
-否定、引用示例、询问如何运行、假设讨论不能解释成执行请求。取消用 cancel。
+否定、引用示例、询问如何运行、假设讨论不能解释成执行请求。取消用 cancel。要求重新审查或补审用 review，绝不解释为重新规划。
 明确要多个方案设置 multiple_plans=true。歧义、缺少明确基线用 clarify 和一句问题。
 沿用已保存策略并不等于继承上次参数；仅“沿用上一版/刚才方案”等才设置 use_latest=true。
 参数只填用户明确修改的值，不补入默认参数或历史优化建议。策略由服务端处理。
@@ -128,7 +128,7 @@ class WorkflowController:
         if not isinstance(intent, Intent):
             raise ValueError('需求识别未完成，未执行操作')
         intent = self.normalize_intent(intent)
-        if intent.action in {'plan', 'export', 'display', 'cancel'} and (not intent.evidence_quote.strip() or intent.evidence_quote not in item['content']):
+        if intent.action in {'plan', 'export', 'display', 'cancel', 'review'} and (not intent.evidence_quote.strip() or intent.evidence_quote not in item['content']):
             raise ValueError('需求识别缺少本轮执行依据，未执行操作')
         return intent
 
@@ -162,13 +162,26 @@ class WorkflowController:
                 return persisted, persisted['detail']
             w['intent'] = intent.model_dump(exclude_unset=False)
             w['intent']['parameter_overrides'] = intent.parameter_overrides.model_dump(exclude_unset=True)
+            if intent.action == 'plan':
+                try:
+                    project = await self.service.prepare_data(item['session_id'], item.get('data_revision'))
+                    item['project_id'] = w['project_id'] = project['id']
+                    self.store.put('message', item)
+                    self.publish(w, status='validating', detail='规划前固定规则预检')
+                    checked = await self.service.check_data(item['session_id'], expected_revision=item.get('data_revision'))
+                    if not checked.get('valid', False):
+                        errors = [r['description'] for r in checked.get('rule_preflight', {}).get('results', []) if r['severity'] == 'error']
+                        detail = '预检未通过，未启动算法：' + ('；'.join(errors) or checked.get('error', '请查看数据检查报告'))
+                        return self.publish(w, status='blocked', detail=detail), detail
+                except (ValueError, OSError) as exc:
+                    return self.publish(w, status='blocked', detail=str(exc)), str(exc)
             self.coordinator.bind(item, intent, w)
             if intent.action in {'query', 'discuss'}:
                 self.publish(w, status='completed', detail='进入问答，未提交计算')
                 return w, None
             if intent.action == 'clarify' or intent.multiple_plans:
                 return self.publish(w, status='blocked', detail='请分次指定要执行的方案。' if intent.multiple_plans else intent.question or '请明确本轮任务。'), w.get('detail')
-            if intent.action in {'plan', 'export', 'display', 'cancel'}:
+            if intent.action in {'plan', 'export', 'display', 'cancel', 'review'}:
                 # Only the server writes this record, after interpreting the
                 # current user request. Keep a snapshot for later rechecks.
                 w['authorization'] = {'source': 'user_request', 'action': intent.action,
@@ -232,6 +245,13 @@ class WorkflowController:
                 base = max(candidates, key=lambda r: r.get('created', 0))['id']
             if base:
                 self.service.owned_run(sid, base)
+            if intent['action'] == 'review':
+                candidates = self.store.find('run', sid, kind='planning')
+                target = base or (max(candidates, key=lambda r: r.get('created', 0))['id'] if candidates else None)
+                if not target:
+                    raise ValueError('没有可审查的规划结果')
+                review = self.service.reviewer.enqueue(sid, target, w['id'])
+                return self.publish(w, status='completed', review_id=review['id'], detail='已提交独立审查，不重跑规划。')
             if intent['action'] == 'export':
                 if not base:
                     raise ValueError('请指定需要导出的运行')
@@ -243,22 +263,9 @@ class WorkflowController:
                 receipt = self.service.show(sid, base)
                 return self.publish(w, status='completed', display=receipt, detail='已请求展示，等待 QGIS 回执。')
             overrides = dict(intent.get('parameter_overrides') or {})
-            policy = session.get('policy', {})
-            if not session.get('policy_confirmed_at'):
-                roads = bool(project.get('recognition_path'))
-                formal = not roads and bool(project['summary'].get('infrastructure_count'))
-                policy = {'use_formal_infrastructure': formal,
-                    'use_recognition_roads': roads,
-                    'split_oversized_imbs': intent.get('scope') != 'partition'}
-            proposed = {**{k: policy.get(k, False) for k in PolicyInput.model_fields}, **{k: overrides[k] for k in PolicyInput.model_fields if k in overrides}}
-            w['proposed_policy'] = proposed
-            if any(proposed[k] != policy.get(k, False) for k in PolicyInput.model_fields) or not session.get('policy_confirmed_at'):
-                return self.waiting(w, '请确认工程策略：' + '、'.join(k for k, enabled in {'使用正式基础设施': proposed['use_formal_infrastructure'], '使用识别道路': proposed['use_recognition_roads'], '按服务单元拆分超限楼栋': proposed['split_oversized_imbs']}.items() if enabled), [('save_policy', '保存以上策略并继续'), ('cancel', '取消')])
-            if policy.get('use_recognition_roads') and not project.get('recognition_path'):
-                options = [('formal_only', '仅用现有正式设施继续')] if project['summary'].get('infrastructure_count') else []
-                return self.waiting(w, '已启用识别道路，但没有登记对应数据。', options + [('supply', '先补充识别道路'), ('cancel', '取消')])
-            for key in PolicyInput.model_fields:
-                overrides.pop(key, None)
+            policy = self.service.default_policy(project)
+            self.service.set_policy(sid, PolicyInput(**policy))
+            session = self.store.get('session', sid)
             spec = RunInput(request_id=w['id'], scope=intent['scope'], base_run_id=base, parameter_overrides=overrides)
             checked = self.service.validate(sid, spec)
             if not checked['valid']:

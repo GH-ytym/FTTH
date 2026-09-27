@@ -60,13 +60,13 @@ class TaskCoordinator:
             continuing = intent.continue_task and previous is not None
             if intent.continue_task and not previous:
                 raise ValueError('原任务已失效，请明确本轮完整需求')
-            if continuing and previous['mode'] == 'read_only' and intent.action in {'plan', 'export', 'display', 'cancel'}:
+            if continuing and previous['mode'] == 'read_only' and intent.action in {'plan', 'export', 'display', 'cancel', 'review'}:
                 raise ValueError('上一任务仅讨论；补充回答不提供执行授权。需要运行时请明确提出新的执行请求。')
             # A conversation about a running worker is a separate question; it
             # must not revise that worker's already-submitted task contract.
             if continuing and previous['status'] in {'running', 'reviewing'}:
                 continuing = False
-            mode = ('execute' if intent.action in {'plan', 'export', 'display', 'cancel'} else
+            mode = ('execute' if intent.action in {'plan', 'export', 'display', 'cancel', 'review'} else
                     'read_only' if intent.action in {'query', 'discuss', 'compare'} else intent.purpose)
             if continuing:
                 task = copy.deepcopy(previous)

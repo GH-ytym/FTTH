@@ -25,9 +25,10 @@ from langchain_core.messages.utils import count_tokens_approximately
 logger = logging.getLogger("ftth.agent")
 
 PROMPT = """你是 FTTH 规划助手的只读问答阶段，使用中文。回答本轮问题，可通过工具检查项目、校验参数、读取和比较结果。执行请求由前置工作流处理。
+输出采用清晰的 Markdown，自主根据内容选择完整段落、分段说明、列表或表格，不固定套用列表或三段式。解释因果时优先连贯段落，多对象或多指标对比时可用表格，独立事项可用列表；复杂回答可组合这些形式。适度加粗关键结论，字段名用行内代码。使用自然、明确的中文，不堆砌状态标签、原始 JSON、无关参数或内部路径。不编造文件链接；没有工具证据不引用文件。区分已确认问题与待核验事项。
 回答项目算法行为（容量、局站数量、距离计算）前必须用read_algorithm_reference读取实现依据；数据元信息和你先前的回复不能代替实现证据。无法读取时明确未知，不能猜公式、支持能力或计算结果。发现旧回复错误应直接纠正。
 区分输入预检通过、条件推论与实际运行结果。validate_inputs只检查输入，不验证分配可行性；600被接受不是方案可行，也不是无解的证明。理论容量不足不等于当前软件支持补建局站。
-用户只讨论时，直接解释影响，不追加必须确认的执行步骤、不催补数据或修改工程策略。只在缺信息确实无法回答时问一个问题。默认不超过三小段，避免对未选定的多种参数长篇展开；不罗列默认参数和内部ID。
+用户只讨论时，直接解释影响，不追加必须确认的执行步骤、不催补数据或修改工程策略。只在缺信息确实无法回答时问一个问题。篇幅随问题复杂度调整，避免对未选定的多种参数长篇展开；不罗列无关默认参数和内部ID。
 优先回答本轮目标，不能用旧问题的数据检查总结替代新问题的影响分析。用户补充上一轮问题时，将回答与助手的澄清问题对应，保留原问题中已明确的对象、数值和限制，不重复问已回答的内容。
 假设讨论应解释改变的含义、受影响的约束和可由当前数据支持的推论；没有重算就不声称得到重算结果。必要时查询相关证据，数据检查只作为依据，不是默认的回答模板。
 未登记项目时可以正常对话，执行规划前引导用户在数据页登记，不要假定已有数据。
@@ -157,7 +158,7 @@ class AgentController:
             return self.store.get("message", existing)
         session = self.store.get("session", session_id)
         item = {"id": uid("message"), "session_id": session_id, "content": message.content, "status": "queued", "created": time.time(),
-                "allow_auto_repair": message.allow_auto_repair, "project_id": session.get("project_id")}
+                "project_id": session.get("project_id"), "data_revision": self.service.data_draft(session_id)["revision"]}
         self.store.publish_message(item, [("user", {"text": message.content})])
         self.store.dedup(session_id, "message:" + message.request_id, item["id"])
         session = self.store.get("session", session_id)
@@ -171,63 +172,32 @@ class AgentController:
 
     def completed(self, run):
         self.workflows.run_changed(run)
-        if run.get('workflow_id') and run.get('kind') == 'planning':
-            return  # Run events show calculation progress; review closes the story.
         item = {"id": "completion_" + run["id"], "session_id": run["session_id"], "status": "queued",
                 "content": "后台任务完成通知（仅解释结果）：" + json.dumps(run_summary(run), ensure_ascii=False), "notification": True, "run_id": run["id"], "created": time.time()}
         self.store.put("message", item)
         self.service.spawn(self.publish_completion(item, run))
 
     async def publish_completion(self, item, run):
-        async with self.locks[item["session_id"]]:
-            action = "导出" if run.get("kind") == "export" else "规划计算"
-            if run["status"] == "succeeded":
-                text = action + "已完成。"
-                if run.get("kind") == "planning":
-                    text += "计算成功不代表工程验收通过；独立审查状态请查看运行页。"
-                text += "成果与校验详情已保存在本次运行中。"
-            else:
-                text = action + "未完成，请在运行页查看失败阶段与处理建议。"
-            item.update(status="succeeded", response=text, elapsed_seconds=0)
-            self.store.publish_message(item, [("assistant", {"text": text, "status": "succeeded"})])
+        await self.publish_result(run['id'])
 
     def review_completed(self, review):
         self.workflows.review_changed(review)
         self.service.spawn(self.publish_review(review))
 
     async def publish_review(self, review):
-        # Validated reports are historical facts, never user instructions. No
-        # second LLM paraphrase can silently upgrade the structured verdict.
-        async with self.locks[review["session_id"]]:
-            mid = "review_report_" + review["id"]
-            labels = {"pass": "通过（不代表工程验收）", "needs_review": "需要复核", "fail": "未通过", "insufficient_evidence": "证据不足"}
-            result = review.get("result") or {}
-            if review["status"] == "completed":
-                text = "独立审查：" + labels.get(result.get("verdict"), "结论待复核") + "。"
-                counts = {s: sum(f['severity'] == s for f in result.get('findings', [])) for s in ('error', 'warning', 'info')}
-                text += f"{counts['error']} 项错误、{counts['warning']} 项警告、{counts['info']} 项说明，详情可在运行页查看。"
-                if review.get("repair", {}).get("status") == "submitted":
-                    text += "已增加搜索预算并提交一次重算。"
-            else:
-                text = {"failed": "独立审查未完成，规划结果已保留。可在运行页查看原因并点击“补充审查”。",
-                    "skipped": "本次未执行独立审查，请在运行页查看原因；程序校验结果仍可查看。",
-                    "interrupted": "独立审查已中断，规划记录已保留。"}.get(review["status"], "独立审查正在处理中。")
-            run = self.store.get('run', review['run_id'])
-            if run.get('workflow_id'):
-                calculation = {'succeeded': '规划计算已完成', 'failed': '规划计算失败',
-                    'cancelled': '规划计算已取消', 'interrupted': '规划计算已中断'}.get(run['status'], '规划计算尚未结束')
-                text = calculation + '。' + text
-                important = next((f for severity in ('error', 'warning') for f in result.get('findings', []) if f['severity'] == severity), None)
-                if important:
-                    description = ' '.join(important.get('description', '').split())
-                    text += '优先复核：' + description[:160] + ('…' if len(description) > 160 else '') + '。'
-                if review.get('repair', {}).get('status') != 'submitted':
-                    text += '已使用一次受限重算额度。' if run.get('repair_count', 0) else '本次未自动重算。'
-                    if run['status'] == 'succeeded':
-                        text += '成果已保留；审查结论不代表工程验收通过。'
-            item = {"id": mid, "session_id": review["session_id"], "status": "succeeded", "notification": True,
-                "response": text, "created": time.time(), "review_id": review["id"]}
-            self.store.publish_message(item, [("assistant", {"text": text, "status": "succeeded"})])
+        await self.publish_result(review['run_id'])
+
+    async def publish_result(self, run_id):
+        from .result_summary import summarize
+        run = self.store.get('run', run_id)
+        async with self.locks[run['session_id']]:
+            run = self.store.get('run', run_id)
+            text = summarize(run, run.get('review'))
+            item = {'id': 'completion_' + run_id, 'session_id': run['session_id'],
+                    'status': 'succeeded', 'notification': True, 'run_id': run_id,
+                    'response': text, 'created': run.get('created', time.time())}
+            self.store.publish_message(item, [('assistant', {'text': text, 'status': 'succeeded',
+                'run_id': run_id, 'result_ref': {'kind': 'run', 'id': run_id}})])
 
     def tools(self, session_id, message_id, notification=False):
         service = self.service
@@ -247,13 +217,13 @@ class AgentController:
             return message_id + ":" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
         @tool
-        def inspect_project() -> dict:
+        async def inspect_project() -> dict:
             """查看当前会话的数据快照、字段、规模和最近运行；没有参数。"""
-            return {**service.inspect(session_id), "engine_capabilities": capabilities(), "confirmed_policy": service.store.get("session", session_id).get("policy", {}),
+            return {**await service.check_data(session_id, expected_revision=self.store.get("message", message_id).get("data_revision")), "engine_capabilities": capabilities(), "confirmed_policy": service.store.get("session", session_id).get("policy", {}),
                 "recent_runs": [{"id": r["id"], "status": r["status"], "parameters": r.get("parameters"), "scope": r.get("scope")} for r in service.store.find("run", session_id)[-10:]]}
 
         @tool(args_schema=PlanningToolInput)
-        def validate_inputs(scope: str | None = None, parameter_overrides: ParameterOverrides | None = None, base_run_id: str | None = None) -> dict:
+        async def validate_inputs(scope: str | None = None, parameter_overrides: ParameterOverrides | None = None, base_run_id: str | None = None) -> dict:
             """校验规划输入。scope为full或partition；parameter_overrides只填修改项。
             参数包含nro_max_cap、zpm_max_cap、formal_duct_capacity（正整数容量），
             pbo_offset_m、ptech_max_spacing_m、terminal_snap_distance_m（正数，米），
@@ -261,7 +231,7 @@ class AgentController:
             ga_population（4至100）、ga_generations（1至100）、ga_refine（布尔），
             split_oversized_imbs、use_formal_infrastructure、use_recognition_roads（布尔）。
             base_run_id指定继承的已有规划；留空使用默认值。"""
-            return call(lambda: service.validate(session_id, RunInput(request_id="validate", scope=scope, parameter_overrides=overrides_dict(parameter_overrides), base_run_id=base_run_id)))
+            return await service.check_data(session_id, RunInput(request_id="validate", scope=scope, parameter_overrides=overrides_dict(parameter_overrides), base_run_id=base_run_id), self.store.get("message", message_id).get("data_revision"))
 
         @tool(args_schema=PlanningToolInput)
         async def submit_planning(parameter_overrides: ParameterOverrides | None = None, scope: str | None = None, base_run_id: str | None = None) -> dict:

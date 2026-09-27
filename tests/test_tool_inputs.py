@@ -19,9 +19,9 @@ def test_model_tools_decode_object_and_preserve_inheritance(tmp_path):
     service.set_policy(sid, PolicyInput(**changes))
     authorize_message(service, sid, "msg")
     args = {"scope": "full", "parameter_overrides": changes}
-    assert tools["validate_inputs"].invoke(args)["valid"]
+    assert asyncio.run(tools["validate_inputs"].ainvoke(args))["valid"]
     encoded = {**args, "parameter_overrides": json.dumps(changes)}
-    assert tools["validate_inputs"].invoke(encoded)["valid"]
+    assert asyncio.run(tools["validate_inputs"].ainvoke(encoded))["valid"]
     first = asyncio.run(tools["submit_planning"].ainvoke(encoded))
     assert first["parameters"]["use_formal_infrastructure"] is True
     assert asyncio.run(tools["submit_planning"].ainvoke(args))["id"] == first["id"]
@@ -32,7 +32,7 @@ def test_model_tools_decode_object_and_preserve_inheritance(tmp_path):
     assert second["parameters"]["zpm_max_cap"] == 600
     assert second["parameters"]["use_formal_infrastructure"] is True
     assert second["scope"] == "full"
-    assert tools["validate_inputs"].invoke({"base_run_id": second["id"]})["valid"]
+    assert asyncio.run(tools["validate_inputs"].ainvoke({"base_run_id": second["id"]}))["valid"]
 
 
 @pytest.mark.parametrize("value", [

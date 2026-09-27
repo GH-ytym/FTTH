@@ -1,11 +1,11 @@
 """Plain text rendering of durable review records; no model-generated HTML."""
 VERDICTS = {"pass": "通过（不代表工程验收）", "needs_review": "需要复核", "fail": "未通过", "insufficient_evidence": "证据不足"}
-STATUSES = {"queued": "排队中", "running": "读取证据与审查中", "completed": "完成", "failed": "失败", "interrupted": "中断", "skipped": "未执行"}
+STATUSES = {"queued": "排队中", "running": "读取证据与审查中", "completed": "完成", "failed": "暂未完成", "interrupted": "中断", "skipped": "未执行"}
 
 
 def render_reviews(reviews):
     if not reviews:
-        return "此批次尚未审查。可点击“补充审查”；补审不会启动自动重算。"
+        return "此批次尚未审查。可在对话中说“重新审查本次结果”。"
     sections = []
     for review in reversed(reviews):
         result, evidence = review.get("result", {}), review.get("evidence", {})
@@ -17,7 +17,7 @@ def render_reviews(reviews):
         if result:
             lines.extend(["审查结论：" + VERDICTS[result["verdict"]], "", result["summary"]])
         elif review.get("error"):
-            lines.append(review.get("error_message") or "审查未完成，可点击“补充审查”。")
+            lines.append(review.get("error_message") or "审查未完成，可在对话中说“重新审查本次结果”。")
             lines.append("诊断：" + review.get("stage", "unknown") + " / " + review.get("error_code", review["error"]))
         if evidence:
             lines.append("程序校验：" + ("发现失败项" if evidence.get("deterministic_failed") else "存在警告或待复核项" if evidence.get("deterministic_warning") else "未检出失败项"))
@@ -27,6 +27,21 @@ def render_reviews(reviews):
         missing = result.get("unchecked") or evidence.get("missing", [])
         if missing:
             lines.extend(["", "未检查／缺失证据：" + "、".join(missing)])
+        rule_report = review.get('rule_checks', {})
+        if rule_report:
+            lines.extend(['', '工作簿规则工具：' + rule_report.get('rulepack_version', ''), '来源校验值：' + rule_report.get('workbook_sha256', '')])
+            for item in rule_report.get('results', []):
+                if item['status'] == 'pass':
+                    continue
+                lines.extend([f"规则 {item['rule_id']} · {item['status']}：{item['description']}",
+                    '来源：' + item.get('source', ''), '对象：' + '、'.join(item.get('object_ids', []))])
+                for key in ('totals', 'measured_overlaps'):
+                    if item.get(key):
+                        import json
+                        lines.append(json.dumps(item[key], ensure_ascii=False))
+        desktop = review.get('qgis_state')
+        if desktop:
+            lines.extend(['', 'QGIS 状态：' + desktop.get('reason', ''), '桌面已检查：' + str(desktop.get('desktop_observed', False))])
         repair = review.get("repair", {})
         if repair:
             lines.extend(["", "一次重算：" + ("已提交 " + repair["run_id"] if repair["status"] == "submitted" else "未执行：" + repair.get("reason", ""))])

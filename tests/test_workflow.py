@@ -1,14 +1,13 @@
 import asyncio
 import json
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from backend.agent import AgentController, BoundedContext
-from backend.models import Parameters, PolicyInput, RunInput, WorkflowChoice
+from backend.models import Parameters, PolicyInput, RunInput
 from backend.workflow import Intent, WorkflowController
 from backend.store import Store
 from test_agent import FakeToolModel
@@ -63,14 +62,14 @@ def test_default_routing_prefers_roads_and_falls_back_to_infra(tmp_path, roads, 
     session.pop('policy_confirmed_at', None)
     service.store.put('session', session)
     w, _ = asyncio.run(controller.start(item))
-    assert w['status'] == 'waiting_choice'
-    assert w['proposed_policy']['use_recognition_roads'] is roads
-    assert w['proposed_policy']['use_formal_infrastructure'] is (formal and not roads)
+    assert w['status'] == 'submitted'
+    params = service.store.get('run', w['run_id'])['parameters']
+    assert params['use_recognition_roads'] is roads
+    assert params['use_formal_infrastructure'] is (formal and not roads)
 
 
 @pytest.mark.parametrize('legacy', [None, True, False])
-@pytest.mark.parametrize('auto_rerun', [True, False])
-def test_request_authorizes_plan_then_export_without_mode(tmp_path, legacy, auto_rerun):
+def test_request_authorizes_plan_then_export_without_mode(tmp_path, legacy):
     from backend.models import MessageInput, ExportInput
 
     async def scenario():
@@ -80,11 +79,11 @@ def test_request_authorizes_plan_then_export_without_mode(tmp_path, legacy, auto
         controller = AgentController(service, None, IntentModel())
         fields = {} if legacy is None else {'allow_actions': legacy}
         item = controller.enqueue(sid, MessageInput(request_id='plan', content='开始完整规划',
-            allow_auto_repair=auto_rerun, **fields))
+            **fields))
         assert 'allow_actions' not in item
         await controller.respond(item)
         run = service.store.all('run')[0]
-        assert run['allow_auto_repair'] is auto_rerun
+        assert 'allow_auto_repair' not in run
         w = service.store.get('workflow', run['workflow_id'])
         assert w['authorization'] == {'source':'user_request', 'action':'plan',
             'evidence_quote':'开始完整规划', 'request_content':'开始完整规划'}
@@ -151,43 +150,8 @@ def test_authorization_is_bound_to_current_request(tmp_path, tamper):
     assert not service.store.all('run')
 
 
-def test_conflict_selection_replay_and_cancel(tmp_path):
-    service, controller, item, other = fixture(tmp_path, conflict=True)
-    w, _ = asyncio.run(controller.start(item))
-    assert w['status'] == 'waiting_choice' and not service.store.all('run')
-    with pytest.raises(ValueError, match='不属于'):
-        controller.owned(other, w['id'])
-    choice = WorkflowChoice(request_id='choose', option_id='formal_only', version=w['version'])
-    def resolve():
-        return controller.resolve(item['session_id'], w['id'], choice)
-    with ThreadPoolExecutor(2) as pool:
-        results = list(pool.map(lambda _:resolve(), range(2)))
-    assert results[0]['run_id'] == results[1]['run_id']
-    assert len(service.store.all('run')) == 1
-    assert service.store.get('session', item['session_id'])['policy']['use_recognition_roads'] is False
-    asyncio.run(controller.cancel(item['session_id'], w['id']))
-    assert service.store.get('run', results[0]['run_id'])['status'] == 'cancelled'
 
 
-@pytest.mark.parametrize('change', ['policy', 'revoke', 'cancel', 'new_plan'])
-def test_stale_choice_never_executes(tmp_path, change):
-    service, controller, item, _ = fixture(tmp_path, conflict=True)
-    w, _ = asyncio.run(controller.start(item))
-    choice = WorkflowChoice(request_id='choose', option_id='formal_only', version=w['version'])
-    if change == 'policy':
-        service.set_policy(item['session_id'], PolicyInput(use_formal_infrastructure=True, split_oversized_imbs=True))
-    elif change == 'revoke':
-        service.store.put('message', {**service.store.get('message', item['id']), 'content':'请求已撤销'})
-    elif change == 'cancel':
-        asyncio.run(controller.cancel(item['session_id'], w['id']))
-    else:
-        newer = {**item, 'id':'newer'}
-        newer.pop('workflow_id', None)
-        service.store.put('message', newer)
-        asyncio.run(controller.start(newer))
-    with pytest.raises(ValueError):
-        controller.resolve(item['session_id'], w['id'], choice)
-    assert not service.store.all('run')
 
 
 @pytest.mark.parametrize('model', [IntentModel(malformed=True), IntentModel(quote='不存在的授权'), IntentModel(quote='')])
@@ -283,19 +247,6 @@ def test_cancel_while_model_is_running_prevents_submission(tmp_path):
     asyncio.run(scenario())
 
 
-def test_snapshot_tampering_at_choice_blocks_run(tmp_path):
-    import hashlib
-    service, controller, item, _ = fixture(tmp_path, conflict=True)
-    file = tmp_path/'config.json'
-    file.write_text('{}')
-    project = service.store.get('project','p')
-    project.update(config_path=str(file), hashes={'config.json':hashlib.sha256(file.read_bytes()).hexdigest()})
-    service.store.put('project',project)
-    w, _ = asyncio.run(controller.start(item))
-    file.write_text('{"changed":true}')
-    w = controller.resolve(item['session_id'], w['id'], WorkflowChoice(request_id='x', option_id='formal_only', version=w['version']))
-    assert w['status'] == 'blocked' and '快照已改变' in w['detail']
-    assert not service.store.all('run')
 
 
 def test_current_input_is_not_truncated_to_fit_budget():
@@ -335,30 +286,10 @@ def test_discussion_does_not_supersede_pending_authorized_request(tmp_path):
     service.store.put('message', read_only)
     blocked, _ = asyncio.run(controller.start(read_only))
     assert blocked['status']=='completed' and 'authorization' not in blocked
-    assert service.store.get('workflow',waiting['id'])['status']=='waiting_choice'
+    assert service.store.get('workflow',waiting['id'])['status']=='submitted'
     assert service.store.get('session',item['session_id'])['latest_workflow_id']==waiting['id']
 
 
-def test_workflow_has_one_combined_completion_notice(tmp_path):
-    service, controller, item, _ = fixture(tmp_path)
-    async def scenario():
-        workflow, _ = await controller.start(item)
-        run = service.store.get('run', workflow['run_id'])
-        run['status'] = 'succeeded'
-        service.store.put('run', run)
-        agent = AgentController(service, None)
-        service.settings.model = service.settings.api_key = service.settings.base_url = ''
-        agent.completed(run)
-        assert not any(m['id'].startswith('completion_') for m in service.store.all('message'))
-        await agent.publish_review({'id':'combined', 'run_id':run['id'], 'session_id':item['session_id'],
-            'status':'completed', 'result':{'verdict':'needs_review', 'findings':[
-                {'severity':'warning', 'description':'需要确认管孔容量'},
-                *[{'severity':'info', 'description':'说明'} for _ in range(3)]]}})
-        text = service.store.get('message', 'review_report_combined')['response']
-        assert '规划计算已完成' in text and '需要复核' in text
-        assert '0 项错误、1 项警告、3 项说明' in text
-        assert '需要确认管孔容量' in text and '本次未自动重算' in text
-    asyncio.run(scenario())
 
 
 def test_use_latest_follows_creation_not_last_update(tmp_path):
@@ -376,3 +307,34 @@ def test_use_latest_follows_creation_not_last_update(tmp_path):
     w, _ = asyncio.run(controller.start(item))
     assert w['status'] == 'submitted'
     assert service.store.get('run', w['run_id'])['base_run_id'] == 'run_newer'
+
+
+def test_new_defaults_do_not_need_policy_confirmation(tmp_path):
+    service, controller, item, _ = fixture(tmp_path)
+    session = service.store.get('session', item['session_id'])
+    session.pop('policy_confirmed_at', None)
+    service.store.put('session', session)
+    w, _ = asyncio.run(controller.start(item))
+    assert w['status'] == 'submitted'
+    run = service.store.get('run', w['run_id'])
+    assert run['parameters']['ga_refine'] and run['parameters']['split_oversized_imbs']
+    assert w['options'] == []
+
+
+def test_completed_result_is_updated_in_place_and_run_bound(tmp_path):
+    service, controller, item, _ = fixture(tmp_path)
+    async def scenario():
+        w, _ = await controller.start(item)
+        run = service.store.get('run', w['run_id'])
+        run['status'] = 'succeeded'
+        service.store.put('run', run)
+        agent = AgentController(service, None)
+        await agent.publish_result(run['id'])
+        mid = 'completion_' + run['id']
+        assert run['id'] in service.store.get('message', mid)['response']
+        run['review'] = {'status':'completed','result':{'verdict':'needs_review','findings':[{'severity':'warning','description':'核验管孔容量'}]}}
+        service.store.put('run',run)
+        await agent.publish_review({'run_id':run['id']})
+        assert '核验管孔容量' in service.store.get('message',mid)['response']
+        assert len([m for m in service.store.all('message') if m['id'].startswith('completion_')]) == 1
+    asyncio.run(scenario())

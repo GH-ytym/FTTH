@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import hmac
+import time
 import json
 import logging
 
@@ -10,7 +11,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from . import __version__
 from .agent import AgentController
-from .models import AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput, ReviewInput, WorkflowChoice
+from .models import QgisStateInput, DataDraftInput, AckInput, DisplayInput, ExportInput, MessageInput, ProjectInput, RunInput, SessionInput, PolicyInput, ReviewInput, WorkflowChoice
 from .review import ReviewController
 from .service import Service, run_summary
 from .settings import Settings
@@ -104,11 +105,37 @@ def create_app(settings=None, model=None, review_model=None, on_shutdown_request
             raise ValueError("请选择项目数据")
         return app.state.service.bind_project(sid, spec.project_id)
 
+    @app.post("/sessions/{sid}/qgis-state")
+    def qgis_state(sid: str, spec: QgisStateInput):
+        app.state.service.owned_run(sid, spec.run_id)
+        with store.lock:
+            session = store.get("session", sid)
+            session["qgis_state"] = {**spec.model_dump(), "received": time.time()}
+            session.setdefault("qgis_states", {})[spec.run_id] = session["qgis_state"]
+            store.put("session", session)
+        return {"saved": True}
+
+    @app.get("/sessions/{sid}/data")
+    def data(sid: str):
+        return app.state.service.data_draft(sid)
+
+    @app.post("/sessions/{sid}/data")
+    def save_data(sid: str, spec: DataDraftInput):
+        from .data_drafts import DraftConflict
+        try:
+            return app.state.service.save_data_draft(sid, spec)
+        except DraftConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/sessions/{sid}/checks/{cid}")
+    def check_report(sid: str, cid: str):
+        return app.state.service.owned_check(sid, cid)
+
     @app.get("/sessions/{sid}/history")
     def history(sid: str):
         with store.lock:
             session = store.get("session", sid)
-            messages = [{k: m[k] for k in ("id", "content", "response", "partial_response", "stream_id", "status", "notification", "elapsed_seconds", "workflow_id", "action_status") if k in m}
+            messages = [{k: m[k] for k in ("id", "content", "response", "partial_response", "stream_id", "status", "notification", "elapsed_seconds", "workflow_id", "action_status", "run_id", "review_id", "created") if k in m}
                 for m in sorted(store.find("message", sid), key=lambda m: m.get("created", 0))]
             for message in messages:
                 if message.get("notification"):

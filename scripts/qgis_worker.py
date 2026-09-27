@@ -28,7 +28,9 @@ def inspect(config_path, recognition_path=None):
         if not count:
             raise ValueError("道路 GPKG 的 GEO_ROAD 没有非空道路几何")
         roads = {"count": count, "crs": layer.crs().authid()}
-    return {"status": "success", "recognition_roads": roads, "quality": result["report"], "meta": topology["meta"],
+    from preflight_checks import inspect_inputs
+    preflight = inspect_inputs(config, recognition_path)
+    return {"status": "success", "rule_preflight": preflight, "recognition_roads": roads, "quality": result["report"], "meta": topology["meta"],
             "layers": [{"name": l["name"], "crs": l.get("crs"), "fields": [f["name"] for f in l.get("fields", [])],
                         "count": sum(n.get("source_layer") == l["name"] for n in nodes) if l["name"] != "INFRASTRUCTURE" else len(topology.get("edges", []))} for l in config["vector_layers"]],
             "nro_count": sum(n.get("source_layer") == "SITE" and str(n.get("original_type", "")).upper() == "NRO" for n in nodes),
@@ -45,6 +47,9 @@ def main():
         mode, path = sys.argv[1:3]
         if mode == "inspect":
             result = inspect(Path(path), sys.argv[3] if len(sys.argv) > 3 else None)
+        elif mode == "preflight":
+            from preflight_checks import inspect_inputs
+            result = inspect_inputs(json.loads(Path(path).read_text(encoding='utf-8-sig')), sys.argv[3] if len(sys.argv) > 3 else None)
         elif mode == "build-config":
             from input_config_builder import build_task1_config
             spec = json.loads(Path(path).read_text(encoding="utf-8"))

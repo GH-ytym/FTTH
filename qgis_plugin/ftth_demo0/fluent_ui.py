@@ -11,12 +11,11 @@ if vendor not in sys.path:
     sys.path.append(vendor)
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QTextTable, QTextLength, QColor, QPalette, QIcon
-from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton)
+from qgis.PyQt.QtGui import QTextTable, QTextLength, QColor, QPalette, QIcon, QTextBlockFormat
+from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton)
 from qfluentwidgets import (PushButton, TransparentPushButton,
     TransparentToolButton, ToolButton, setCustomStyleSheet,
-    LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, DoubleSpinBox, CardWidget,
+    LineEdit, TextEdit, ComboBox, SpinBox, DoubleSpinBox, CardWidget,
     ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, SegmentedWidget,
     FluentIcon as FIF, IndeterminateProgressRing, IconWidget)
 
@@ -75,8 +74,9 @@ class MarkdownView(QTextBrowser):
         self.setOpenExternalLinks(False)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setStyleSheet("background:transparent; border:none; color:#243247; font:14px 'Microsoft YaHei';")
-        self.document().setDefaultStyleSheet("table {border-collapse:collapse;} th,td {padding:5px;border:1px solid #dce3eb;} pre {background:#FFFFFF;} h1,h2,h3 {color:#182b48;}")
+        self.setStyleSheet("background:transparent; border:none; color:#47515c; font:13px 'Microsoft YaHei'; selection-background-color:#dbeafe;")
+        self.document().setDocumentMargin(2)
+        self.document().setDefaultStyleSheet("table {border-collapse:collapse;} th,td {padding:6px;border:1px solid #dce3eb;} pre,code {background:#e9edf1; font-family:Consolas;} h1,h2,h3 {color:#303a45;} a {color:#1674ce;text-decoration:none;} strong {font-weight:600;}")
         self.setMarkdown(text)
         for frame in self.document().rootFrame().childFrames():
             if isinstance(frame, QTextTable):
@@ -90,6 +90,42 @@ class MarkdownView(QTextBrowser):
                 frame.setFormat(fmt)
         self.document().contentsChanged.connect(self.fit)
         QTimer.singleShot(0, self.fit)
+
+    def setMarkdown(self, text):
+        super().setMarkdown(text)
+        # QTextDocument's Markdown importer does not apply paragraph CSS reliably.
+        block = self.document().begin()
+        while block.isValid():
+            cursor = self.textCursor()
+            cursor.setPosition(block.position())
+            fmt = block.blockFormat()
+            fmt.setLineHeight(155, QTextBlockFormat.ProportionalHeight)
+            fmt.setBottomMargin(5 if block.textList() else 9)
+            cursor.setBlockFormat(fmt)
+            fragment = block.begin()
+            while not fragment.atEnd():
+                part = fragment.fragment()
+                style = part.charFormat()
+                font = style.font()
+                if font.fixedPitch() or any(name in font.family().lower() for name in ('mono', 'consolas', 'courier')):
+                    style.setFontFamily('Consolas')
+                    style.setFontPointSize(9)
+                    style.setBackground(QColor('#e9edf1'))
+                    cursor.setPosition(part.position())
+                    cursor.setPosition(part.position() + part.length(), cursor.KeepAnchor)
+                    cursor.setCharFormat(style)
+                fragment += 1
+            block = block.next()
+        for frame in self.document().rootFrame().childFrames():
+            if isinstance(frame, QTextTable):
+                fmt = frame.format()
+                fmt.setBorderCollapse(True)
+                fmt.setBorder(.5)
+                fmt.setBorderBrush(QColor('#dce3eb'))
+                fmt.setCellPadding(6)
+                fmt.setCellSpacing(0)
+                fmt.setWidth(QTextLength(QTextLength.PercentageLength, 100))
+                frame.setFormat(fmt)
 
     def loadResource(self, kind, url):
         # Model text is untrusted; do not fetch images or local files in Markdown.
@@ -141,7 +177,7 @@ class Conversation(ScrollArea):
         self.replies[message_id].update_reply(text, status, elapsed)
         if message_id.startswith(('review_report_', 'completion_')):
             self.replies[message_id].badge.setText('FTTH · 结果总结')
-        if at_bottom:
+        if at_bottom and not message_id.startswith(("completion_", "review_report_", "check_")):
             self.scroll_timer.start(0)
 
     def _scroll_to_bottom(self):
@@ -457,16 +493,10 @@ def build_ui(p, business_layers):
     p.tabs = Pages(p)
     p.tabs.nav.hide()
     p.page_buttons = []
-    for index, label in ((1, "数据"), (2, "运行")):
-        b = TransparentPushButton(label, p)
-        b.setFixedHeight(30)
-        b.clicked.connect(lambda checked=False, i=index: p.tabs.setCurrentIndex(i))
-        heading.addWidget(b)
-        p.page_buttons.append((index, b))
     settings = TransparentToolButton(FIF.SETTING, p)
     settings.setFixedSize(30, 30)
     settings.setToolTip("设置")
-    settings.clicked.connect(lambda: p.tabs.setCurrentIndex(3))
+    settings.clicked.connect(lambda: p.tabs.setCurrentIndex(2))
     heading.addWidget(settings)
     new_chat = TransparentToolButton(FIF.EDIT, p)
     new_chat.setFixedSize(28, 28)
@@ -497,133 +527,55 @@ def build_ui(p, business_layers):
     chat.addWidget(p.transcript, 1)
     composer = QWidget(p.chat)
     composer.setObjectName("composer")
-    composer.setStyleSheet("QWidget#composer {background:#FFFFFF;border:1px solid #e1e6ed;border-radius:20px;}")
+    composer.setStyleSheet("QWidget#composer {background:#FFFFFF;border:1px solid #dfe4e9;border-radius:20px;}")
     box = QVBoxLayout(composer)
-    box.setContentsMargins(12, 8, 12, 8)
-    box.setSpacing(0)
+    box.setContentsMargins(10, 10, 10, 9)
+    box.setSpacing(7)
     p.message = Composer(composer)
     p.message.setFixedHeight(64)
     p.message.setStyleSheet("QTextEdit {background:transparent;border:none;padding:3px;color:#243247;font:14px 'Microsoft YaHei';}")
-    p.message.setPlaceholderText("描述需求，例如：开始完整规划、导出上次结果，或解释问题…")
+    p.message.setPlaceholderText("描述需求，或询问当前方案…")
     p.message.returnPressed.connect(p.send)
     box.addWidget(p.message)
     row = QHBoxLayout()
     attach = TransparentToolButton(FIF.ADD, composer)
     attach.setFixedSize(30, 30)
     attach.setToolTip("添加项目数据")
-    attach.clicked.connect(lambda: p.tabs.setCurrentIndex(1))
+    p.attach_button = attach
+    attach.clicked.connect(p.show_data)
     row.addWidget(attach)
+    hint = CaptionLabel("项目数据", composer)
+    hint.setStyleSheet("color:#77838f;font:11px 'Microsoft YaHei';")
+    row.addWidget(hint)
     row.addStretch()
     p.send_button = ToolButton(FIF.UP, composer)
     p.send_button.clicked.connect(p.send)
     p.send_button.setFixedSize(32, 32)
     p.send_button.setMinimumHeight(32)
     p.send_button.setToolTip("发送 · Enter（Shift+Enter 换行）")
+    setCustomStyleSheet(p.send_button,
+        "ToolButton {background:#454f58;border:0;border-radius:16px;} ToolButton:hover {background:#303b45;}",
+        "ToolButton {background:#454f58;border:0;border-radius:16px;}")
+    p.send_button.setIcon(FIF.UP.icon(color=QColor('white')))
     row.addWidget(p.send_button)
     box.addLayout(row)
     chat.addWidget(composer)
     p.tabs.addTab(p.chat, "对话")
 
+    from .popups import DataPopup, HistoryPopup
+    p.data_popup = DataPopup(p, business_layers)
+    p.history_popup = HistoryPopup(p)
     area, page, layout = scroll_page()
-    c, box = card(page, "项目数据", "登记后创建独立会话；当前图层有选中要素时仅保存所选部分。")
-    p.sources, p.sublayers = {}, {}
-    labels = {"IMB": "楼栋需求", "SITE": "局站", "PTECH": "技术点位", "INFRASTRUCTURE": "基础设施"}
-    for name in business_layers:
-        box.addWidget(BodyLabel(f"{labels.get(name, name)} · {name}", c))
-        line = LineEdit(c)
-        line.setPlaceholderText("选择数据文件，或使用当前 QGIS 图层")
-        p.sources[name] = line
-        box.addWidget(line)
-        row = QHBoxLayout()
-        sub = LineEdit(c)
-        sub.setPlaceholderText("图层 / 工作表名（可选）")
-        p.sublayers[name] = sub
-        row.addWidget(sub, 1)
-        row.addWidget(button("文件", lambda checked=False, n=name: p.browse(n)))
-        row.addWidget(button("当前图层", lambda checked=False, n=name: p.current_layer(n)))
-        box.addLayout(row)
-    p.recognition = LineEdit(c)
-    p.recognition.setPlaceholderText("道路 GeoPackage（优先）；未提供时使用 INFRA 兜底")
-    box.addWidget(p.recognition)
-    box.addWidget(button("选择道路 GPKG", p.browse_recognition))
-    p.data_status = BodyLabel("逐项选择数据文件后，点击登记数据。", c)
-    p.data_status.setWordWrap(True)
-    box.addWidget(p.data_status)
-    box.addWidget(button("登记数据 · 新建会话", p.register, True, FIF.ADD))
-    box.addWidget(button("检查当前会话数据", lambda: p.api("GET", p.route("project"), callback=p.report)))
-    layout.addWidget(c)
-    c, box = card(page, "规划设置", "仅对手动运行生效；对话中请直接说明要修改的参数。")
-    p.scope = ComboBox(c)
-    p.scope.addItem("完整规划", userData="full")
-    p.scope.addItem("仅分区", userData="partition")
-    box.addWidget(p.scope)
-    p.controls = {}
-    for name, label, default in [("use_formal_infrastructure", "采用正式基础设施", False), ("use_recognition_roads", "采用识别道路", False), ("split_oversized_imbs", "同意拆分超过 48 端口的楼宇", False), ("ga_refine", "启用 GA 优化", True)]:
-        control = CheckBox(label, c)
-        control.setChecked(default)
-        p.controls[name] = control
-        box.addWidget(control)
-    box.addWidget(button("保存本会话工程策略", p.save_policy))
-    policy_hint = CaptionLabel("道路与拆分策略保存后供对话沿用；手动运行也会保存所选策略。", c)
-    policy_hint.setWordWrap(True)
-    box.addWidget(policy_hint)
-    numeric = [("nro_max_cap", "NRO 容量", 2048, 1, 1000000), ("zpm_max_cap", "ZPM 容量", 576, 1, 1000000),
-        ("formal_duct_capacity", "管道容量", 2048, 1, 1000000), ("ga_population", "GA 种群", 14, 4, 100), ("ga_generations", "GA 代数", 10, 1, 100),
-        ("candidate_paths", "候选路径数", 5, 1, 20), ("spatial_weight", "空间权重", 1.0, 0, 10000), ("pipe_weight", "管线权重", 100.0, 0, 10000),
-        ("pbo_offset_m", "PBO 偏移 / 米", 5.0, 0.1, 1000), ("water_cost_factor", "水域成本系数", 2.0, 0, 1000),
-        ("ptech_max_spacing_m", "PTECH 间距 / 米", 200.0, 0.1, 100000), ("terminal_snap_distance_m", "端点吸附 / 米", 80.0, 0.1, 100000)]
-    advanced = QWidget(c)
-    form = QFormLayout(advanced)
-    form.setContentsMargins(0, 8, 0, 8)
-    form.setSpacing(12)
-    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    for name, label, default, low, high in numeric:
-        control = SpinBox(advanced) if isinstance(default, int) else DoubleSpinBox(advanced)
-        control.setRange(low, high)
-        control.setValue(default)
-        p.controls[name] = control
-        form.addRow(label, control)
-    toggle = CheckBox("展开高级参数", c)
-    toggle.toggled.connect(advanced.setVisible)
-    box.addWidget(toggle)
-    box.addWidget(advanced)
-    advanced.hide()
+    p.result_title = BodyLabel("运行结果", page)
+    layout.addWidget(p.result_title)
     row = QHBoxLayout()
-    row.addWidget(button("校验参数", lambda: p.manual(False)))
-    row.addWidget(button("运行新方案", lambda: p.manual(True), True, FIF.PLAY))
-    box.addLayout(row)
-    p.manual_auto_repair = CheckBox("搜索失败时自动重算一次", c)
-    p.manual_auto_repair.setToolTip("仅增加搜索预算，不修改数据或工程约束；关闭后仍会审查。")
-    p.manual_auto_repair.setChecked(p.settings.value("manual_auto_repair", True, type=bool))
-    p.manual_auto_repair.toggled.connect(lambda value: p.settings.setValue("manual_auto_repair", value))
-    box.addWidget(p.manual_auto_repair)
-    layout.addWidget(c)
-    layout.addStretch()
-    p.tabs.addTab(area, "数据")
-
-    area, page, layout = scroll_page()
-    c, box = card(page, "方案与运行", "选择批次，查看报告、回到地图或导出交付成果。")
-    p.runs = ComboBox(c)
-    box.addWidget(p.runs)
-    for actions in [[("查看报告", p.run_report), ("显示此版", p.display), ("导出此版", p.export)], [("加载此版参数", p.load_parameters), ("取消工作流", p.cancel)], [("审查报告", p.review_report), ("补充审查", p.request_review)]]:
-        row = QHBoxLayout()
-        for label, callback in actions:
-            row.addWidget(button(label, callback))
-        box.addLayout(row)
-    layout.addWidget(c)
-    c, box = card(page, "方案比较", "比较两个成功批次的参数变化和实际指标。")
-    p.compare_to = ComboBox(c)
-    box.addWidget(p.compare_to)
-    box.addWidget(button("与选中方案比较", p.compare))
-    layout.addWidget(c)
-    c, box = card(page, "详细报告")
-    p.report_box = TextEdit(c)
+    row.addWidget(button("查看报告", lambda: p.open_result_report(False)))
+    row.addWidget(button("审查报告", lambda: p.open_result_report(True)))
+    layout.addLayout(row)
+    p.report_box = TextEdit(page)
     p.report_box.setReadOnly(True)
-    p.report_box.setMinimumHeight(300)
-    p.report_box.setPlaceholderText("选择一个批次查看报告。")
-    box.addWidget(p.report_box)
-    layout.addWidget(c, 1)
-    p.tabs.addTab(area, "运行")
+    layout.addWidget(p.report_box, 1)
+    p.tabs.addTab(area, "结果")
 
     area, page, layout = scroll_page()
     c, box = card(page, "连接设置", "连接本机规划服务。模型密钥由后端管理，无需填入插件。")
@@ -643,13 +595,6 @@ def build_ui(p, business_layers):
     box.addWidget(button("选择令牌文件", p.choose_token, icon=FIF.FOLDER))
     box.addWidget(button("测试连接", lambda: p.api("GET", "/health", callback=p.report), True))
     layout.addWidget(c)
-    c, box = card(page, "对话运行偏好", "明确要求规划或导出即可执行；讨论、假设和询问不会启动计算。")
-    p.auto_repair = CheckBox("搜索失败时自动重算一次", c)
-    p.auto_repair.setToolTip("完整规划未找到可行路径或组合时，允许增加搜索预算并重算一次。\n不修改输入数据、容量或工程策略；关闭后仍会审查。偏好会保存，每次发送时记录。")
-    p.auto_repair.setChecked(p.settings.value("chat_auto_repair", True, type=bool))
-    p.auto_repair.toggled.connect(lambda value: p.settings.setValue("chat_auto_repair", value))
-    box.addWidget(p.auto_repair)
-    layout.addWidget(c)
     layout.addStretch()
     p.tabs.addTab(area, "设置")
     p.status = StatusLabel(p)
@@ -662,7 +607,12 @@ def build_ui(p, business_layers):
     for control in p.findChildren(LineEdit) + p.findChildren(ComboBox) + p.findChildren(TextEdit) + p.findChildren(SpinBox) + p.findChildren(DoubleSpinBox):
         css = "QLineEdit, QTextEdit, QAbstractSpinBox, QPushButton {background:#FFFFFF; color:#243247;}"
         setCustomStyleSheet(control, css, css)
-    p.message.setStyleSheet("QTextEdit {background:#FFFFFF;border:none;padding:3px;color:#243247;font:14px 'Microsoft YaHei';}")
+    p.message.setStyleSheet("QTextEdit {background:transparent;border:none;padding:3px;color:#47515c;font:13px 'Microsoft YaHei';}")
     mark_page(0)
     for control in p.findChildren(QAbstractButton):
         hover_feedback(control)
+    send_css = ('QToolButton, QPushButton {background:#454f58;border:0;border-radius:16px;}'
+                'QToolButton:hover:enabled, QPushButton:hover:enabled {background:#303b45;border-radius:16px;}'
+                'QToolButton:pressed:enabled, QPushButton:pressed:enabled {background:#202a34;border-radius:16px;}')
+    setCustomStyleSheet(p.send_button, send_css, send_css)
+    p.send_button.setStyleSheet(send_css)

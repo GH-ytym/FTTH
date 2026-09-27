@@ -85,11 +85,14 @@ def test_agent_submission_and_export_schedule_real_async_tasks(tmp_path):
             first = executed[0]
             assert service.store.get("run", first)["status"] == "succeeded"
             await controller.publish_completion({"id": "completion_test", "session_id": sid}, service.store.get("run", first))
-            notice = service.store.get("message", "completion_test")["response"]
-            assert "规划计算已完成" in notice and first not in notice and len(notice) < 150
-            await controller.publish_review({"id": "review_test", "run_id": first, "session_id": sid, "status": "failed", "error": "ValueError"})
-            notice = service.store.get("message", "review_report_review_test")["response"]
-            assert "补充审查" in notice and "ValueError" not in notice and first not in notice
+            notice = service.store.get("message", "completion_" + first)["response"]
+            assert "规划计算已完成" in notice and first in notice
+            run = service.store.get('run', first)
+            run['review'] = {'status':'failed', 'error_message':'结构校验未完成'}
+            service.store.put('run', run)
+            await controller.publish_review({'run_id':first})
+            notice = service.store.get('message', 'completion_' + first)['response']
+            assert '审查暂未完成' in notice and first in notice
             export = controller.tools(sid, "export-message")[-1]
             authorize_message(service, sid, "export-message", action="export")
             result = await export.ainvoke({"run_id": first})

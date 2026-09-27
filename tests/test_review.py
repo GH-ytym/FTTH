@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from backend.app import create_app
-from backend.models import PolicyInput, RunInput
+from backend.models import RunInput
 from backend.review import Evidence, ReviewController, ReviewResult, compare_reviews, review_settings
 from backend.settings import Settings
 from test_agent import FakeToolModel
@@ -23,7 +23,7 @@ def fixture_run(tmp_path, *, search=True, scope="full"):
     project = service.store.get("project", "p")
     project.update(config_path=str(config), hashes={"config.json": hashlib.sha256(config.read_bytes()).hexdigest()})
     service.store.put("project", project)
-    run = service.submit(sid, RunInput(request_id="origin", scope=scope, allow_auto_repair=True,
+    run = service.submit(sid, RunInput(request_id="origin", scope=scope,
         parameter_overrides={"use_formal_infrastructure": True, "split_oversized_imbs": True}))
     root = tmp_path / "runs" / run["id"] / "results" / "test"
     root.mkdir(parents=True)
@@ -45,7 +45,7 @@ def fixture_run(tmp_path, *, search=True, scope="full"):
 def approved_review(service, run, patch=None):
     evidence = Evidence(service, run)
     result = ReviewResult(verdict="needs_review", summary="候选组合搜索未解决",
-        checked=list(evidence.items), parameter_patch=patch or {"candidate_paths": 10}, repair_evidence_ids=["task6"])
+        checked=list(evidence.items))
     item = {"id": "review-test", "request_id": "auto", "session_id": run["session_id"], "project_id": run["project_id"],
         "run_id": run["id"], "status": "completed", "automatic": True, "evidence": evidence.summary(), "result": result.model_dump()}
     service.reviewer.publish(item)
@@ -62,8 +62,7 @@ def test_evidence_and_non_overridable_failure(tmp_path):
     # report must name the override before the model's own words.
     assert output.summary.startswith("【程序判定：结论由“通过”改为“未通过”（程序校验存在失败项）")
     assert output.summary.endswith("all good")
-    with pytest.raises(ValueError):
-        evidence.repair_patch(output)
+    assert not hasattr(service, "submit_repair")
 
 
 def test_partition_does_not_require_full_reports(tmp_path):
@@ -128,87 +127,16 @@ def test_symlink_rejected(tmp_path):
         Evidence(service, run).read_file(link)
 
 
-@pytest.mark.parametrize("patch", [{"zpm_max_cap": 600}, {"use_recognition_roads": True}, {"candidate_paths": 11}, {"candidate_paths": True}, {"candidate_paths": 5}, {"ga_refine": False}])
-def test_patch_limits(tmp_path, patch):
-    service, _, _, run, _ = fixture_run(tmp_path)
-    evidence, result, _ = approved_review(service, run, patch)
-    with pytest.raises(ValueError):
-        evidence.repair_patch(result)
 
 
-@pytest.mark.parametrize("reason", ["missing_building_entrance", "fixed_pm_capacity_exceeded", "unknown_failure"])
-def test_non_search_issues_never_repair(tmp_path, reason):
-    service, _, _, run, root = fixture_run(tmp_path)
-    path = root / "task6/layered_plan.json"
-    data = json.loads(path.read_text())
-    data["validation"]["unresolved"].append({"id": "bad", "reason": reason})
-    path.write_text(json.dumps(data))
-    evidence, result, _ = approved_review(service, run)
-    with pytest.raises(ValueError, match="非搜索"):
-        evidence.repair_patch(result)
 
 
-def test_single_repair_and_no_changes_to_source(tmp_path):
-    service, _, _, run, root = fixture_run(tmp_path)
-    before = {str(p): p.read_bytes() for p in root.rglob("*.json")}
-    evidence, result, review = approved_review(service, run)
-    child = service.submit_repair(run["id"], review["id"], evidence.repair_patch(result))
-    assert child["parameters"]["candidate_paths"] == 10
-    assert child["parameters"]["zpm_max_cap"] == run["parameters"]["zpm_max_cap"]
-    assert not child["allow_auto_repair"]
-    with pytest.raises(ValueError, match="额度"):
-        service.submit_repair(run["id"], review["id"], result.parameter_patch)
-    with pytest.raises(ValueError, match="额度"):
-        service.submit_repair(child["id"], review["id"], result.parameter_patch)
-    assert before == {str(p): p.read_bytes() for p in root.rglob("*.json")}
 
 
-@pytest.mark.parametrize("condition", ["disabled", "policy", "superseded", "cancelled", "tampered", "manual_review"])
-def test_authority_revocation(tmp_path, condition):
-    service, sid, _, run, _ = fixture_run(tmp_path)
-    _, result, review = approved_review(service, run)
-    if condition == "disabled":
-        run["allow_auto_repair"] = False
-        service.store.put("run", run)
-    elif condition == "policy":
-        service.set_policy(sid, PolicyInput(use_formal_infrastructure=True, split_oversized_imbs=True))
-    elif condition == "superseded":
-        service.submit(sid, RunInput(request_id="later", scope="partition"))
-    elif condition == "cancelled":
-        asyncio.run(service.cancel(sid, run["id"]))
-    elif condition == "tampered":
-        (tmp_path / "config.json").write_text("modified")
-    else:
-        review["automatic"] = False
-        service.store.put("review", review)
-    with pytest.raises(ValueError):
-        service.submit_repair(run["id"], review["id"], result.parameter_patch)
 
 
-def test_concurrent_repair_is_atomic(tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-    service, _, _, run, _ = fixture_run(tmp_path)
-    _, result, review = approved_review(service, run)
-    def submit():
-        try:
-            return service.submit_repair(run["id"], review["id"], result.parameter_patch)["id"]
-        except ValueError:
-            return None
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: submit(), range(4)))
-    assert len([x for x in results if x]) == 1
-    assert len(service.store.all("run")) == 2
 
 
-def test_queued_repair_rechecks_authority(tmp_path):
-    async def scenario():
-        service, sid, _, run, _ = fixture_run(tmp_path)
-        _, result, review = approved_review(service, run)
-        child = service.submit_repair(run["id"], review["id"], result.parameter_patch)
-        service.set_policy(sid, PolicyInput())
-        await service.execute(child["id"])
-        assert service.store.get("run", child["id"])["status"] == "cancelled"
-    asyncio.run(scenario())
 
 
 def test_new_endpoint_does_not_inherit_secret(tmp_path, monkeypatch):
@@ -232,7 +160,7 @@ class ReviewModel(FakeToolModel):
         else:
             search = bool(summary.get("reasons"))
             args = {"verdict": "needs_review" if search else "pass", "summary": "检出搜索问题" if search else "合成模型已读取程序证据，不代表真实模型验收", "checked": ids,
-                "parameter_patch": {"candidate_paths": 10} if search else {}, "repair_evidence_ids": ["task6"] if search else []}
+                }
             if self.invalid:
                 args["verdict"] = "invented"
             call = {"name": "ReviewResult", "args": args, "id": "answer", "type": "tool_call"}
@@ -305,56 +233,13 @@ def test_query_and_reference_recovery_stays_bounded(tmp_path, always_bad):
         if always_bad:
             assert saved["error_code"] == "invalid_reference"
         else:
-            assert saved["result"]["verdict"] == "pass"
+            assert saved["result"]["verdict"] == "needs_review"  # Desktop/serialized files absent in this fixture.
         assert len(service.store.all("run")) == 1
     asyncio.run(scenario())
 
 
-def test_real_langchain_review_loop_and_single_repair(tmp_path):
-    async def scenario():
-        service, sid, _, run, _ = fixture_run(tmp_path)
-        controller = service.reviewer = ReviewController(service, ReviewModel())
-        review = controller.enqueue(sid, run["id"], "auto", automatic=True)
-        await controller.execute(review)
-        saved = service.store.get("review", review["id"])
-        assert saved["status"] == "completed", saved
-        stages = [event["summary"].get("stage") for event in service.store.events(sid, 0) if event["type"] == "review"]
-        assert "read_evidence" in stages and "model_review" in stages and "validate_result" in stages
-        assert saved["repair"]["status"] == "submitted", saved
-        assert len(service.store.all("run")) == 2
-        assert controller.enqueue(sid, run["id"], "auto", automatic=True)["id"] == review["id"]
-        await service.close()
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('enabled', [True, False])
-def test_request_authority_keeps_review_independent_of_rerun_preference(tmp_path, enabled):
-    from conftest import authorize_message
-
-    async def scenario():
-        service, sid, _, run, _ = fixture_run(tmp_path)
-        authorize_message(service, sid, 'plan-request')
-        message = service.store.get('message', 'plan-request')
-        message['allow_auto_repair'] = enabled
-        service.store.put('message', message)
-        run.update(workflow_id=message['workflow_id'], allow_auto_repair=enabled)
-        run['authorization'].update(source='message', message_id=message['id'])
-        service.store.put('run', run)
-        session = service.store.get('session', sid)
-        session['latest_workflow_id'] = message['workflow_id']
-        service.store.put('session', session)
-        controller = service.reviewer = ReviewController(service, ReviewModel())
-        review = controller.enqueue(sid, run['id'], 'auto', automatic=True)
-        await controller.execute(review)
-        saved = service.store.get('review', review['id'])
-        assert saved['status'] == 'completed' and saved['result']['verdict'] == 'needs_review'
-        assert saved['repair']['status'] == ('submitted' if enabled else 'not_applied')
-        assert len(service.store.all('run')) == (2 if enabled else 1)
-        if enabled:
-            with pytest.raises(ValueError, match='额度'):
-                service.submit_repair(run['id'], review['id'], saved['result']['parameter_patch'])
-        await service.close()
-    asyncio.run(scenario())
 
 
 def test_invalid_output_and_provider_failure_are_contained(tmp_path):
@@ -397,9 +282,9 @@ def test_cross_session_and_legacy_request(tmp_path):
         assert client.get(f"/sessions/{b}/runs/r/reviews").status_code == 400
         assert client.post(f"/sessions/{b}/runs/r/reviews", json={"request_id": "x"}).status_code == 400
         message = client.post(f"/sessions/{a}/messages", json={"request_id": "legacy", "content": "检查", "allow_actions": False, "allow_auto_repair": True}).json()
-        assert message["allow_auto_repair"] is True
+        assert message["detail"]  # Removed field is rejected, never authorizes a rerun.
         assert "allow_actions" not in message  # Legacy flag cannot grant or deny authority.
-        assert not RunInput(request_id="old").allow_auto_repair
+        assert "allow_auto_repair" not in RunInput.model_fields
 
 
 @pytest.mark.parametrize("old,new,expected", [(2, 0, "improved"), (1, 1, "unchanged"), (0, 2, "worsened")])
@@ -457,11 +342,9 @@ def test_cancel_queued_review_and_child(tmp_path):
     async def scenario():
         service, sid, _, run, _ = fixture_run(tmp_path)
         _, result, review = approved_review(service, run)
-        child = service.submit_repair(run["id"], review["id"], result.parameter_patch)
         queued = service.reviewer.enqueue(sid, run["id"], "supplement")
         await service.cancel(sid, run["id"])
         assert service.store.get("review", queued["id"])["status"] == "interrupted"
-        assert service.store.get("run", child["id"])["status"] == "cancelled"
         assert service.store.get("run", run["id"])["status"] == "succeeded"
     asyncio.run(scenario())
 

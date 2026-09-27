@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 
 class StrictModel(BaseModel):
@@ -20,7 +20,7 @@ class Parameters(StrictModel):
     ga_population: int = Field(14, ge=4, le=100)
     ga_generations: int = Field(10, ge=1, le=100)
     ga_refine: bool = True
-    split_oversized_imbs: bool = False
+    split_oversized_imbs: bool = True
     use_formal_infrastructure: bool = False
     use_recognition_roads: bool = False
 
@@ -28,6 +28,13 @@ class Parameters(StrictModel):
 class DataSourceInput(StrictModel):
     path: str = Field(min_length=1)
     source_layer: str = ""
+
+    @field_validator("source_layer", mode="before")
+    @classmethod
+    def empty_source_layer(cls, value):
+        # Older plugins serialize an unselected optional layer as JSON null.
+        # Normalize only null; retain strict validation of every other type.
+        return "" if value is None else value
 
 
 class ProjectInput(StrictModel):
@@ -46,9 +53,14 @@ class SessionInput(StrictModel):
     project_id: str | None = None
 
 
+class DataDraftInput(StrictModel):
+    revision: int = Field(ge=0)
+    sources: dict[Literal["IMB", "SITE", "PTECH", "INFRASTRUCTURE"], DataSourceInput] = Field(default_factory=dict)
+    recognition_path: str | None = None
+
+
 class RunInput(StrictModel):
     request_id: str = Field(min_length=1)
-    allow_auto_repair: bool = False
     base_run_id: str | None = None
     scope: Literal["partition", "full"] | None = None
     parameter_overrides: dict = Field(default_factory=dict)
@@ -60,7 +72,6 @@ class MessageInput(StrictModel):
     # Accepted for older clients only; execution authority comes from the
     # current request's interpreted workflow, never from this client flag.
     allow_actions: bool | None = Field(default=None, deprecated=True)
-    allow_auto_repair: bool = False
 
 
 class ReviewInput(StrictModel):
@@ -76,7 +87,7 @@ class WorkflowChoice(StrictModel):
 class PolicyInput(StrictModel):
     use_formal_infrastructure: bool = False
     use_recognition_roads: bool = False
-    split_oversized_imbs: bool = False
+    split_oversized_imbs: bool = True
 
 
 class DisplayInput(StrictModel):
@@ -93,3 +104,18 @@ class AckInput(StrictModel):
 class ExportInput(StrictModel):
     request_id: str
     run_id: str
+
+
+class QgisLayerState(StrictModel):
+    source_hash: str = Field(default="", max_length=64)
+    name: str = Field(max_length=100)
+    valid: bool
+    modified: bool = False
+    crs: str = Field(max_length=200)
+    count: int = Field(ge=-1)
+
+
+class QgisStateInput(StrictModel):
+    run_id: str
+    project_crs: str = Field(max_length=200)
+    layers: list[QgisLayerState] = Field(max_length=20)

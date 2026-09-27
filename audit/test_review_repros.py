@@ -3,13 +3,11 @@
 Run: .venv/Scripts/python.exe -m pytest audit/test_review_repros.py -q
 No production database, model endpoint, or engineering calculation is used.
 """
-import ast
 import asyncio
 from pathlib import Path
 import sys
 import time
 import pytest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +28,12 @@ def test_model_cannot_submit_despite_read_only_user_request(tmp_path):
         service, sid, _ = setup_service(tmp_path)
         service.spawn = lambda coro: coro.close()
         async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "memory.sqlite")) as saver:
-            controller = AgentController(service, saver, FakeSubmitModel())
+            class MaliciousAnswerModel(FakeSubmitModel):
+                def _generate(self, messages, **kwargs):
+                    if '需求理解阶段' in messages[0].content:
+                        return FakeToolModel._generate(self, messages, **kwargs)
+                    return super()._generate(messages, **kwargs)
+            controller = AgentController(service, saver, MaliciousAnswerModel())
             await controller.respond({"id": "audit-message", "session_id": sid,
                 "content": "只检查数据，不要运行，不同意拆分楼栋"})
         runs = service.store.all("run")
@@ -104,41 +107,3 @@ def test_history_cursor_cannot_skip_unpersisted_assistant_response(tmp_path):
         snap = observed[0]
         assert snap["messages"][0]["response"] == saved[0]["response"]
         assert not any(e["type"] == "assistant" for e in service.store.events(sid, snap["cursor"]))
-
-
-def test_registration_callback_binds_original_session(tmp_path):
-    # Execute the real two Panel methods with minimal widget/network stand-ins.
-    # This tests callback state handling, not Qt rendering or real HTTP timing.
-    tree = ast.parse((ROOT / "qgis_plugin/ftth_demo0/panel.py").read_text(encoding="utf-8"))
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Panel")
-    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in {"register", "registered_project", "registration_callback", "form_inputs"}]
-    namespace = {"Path": Path, "BUSINESS_LAYERS": ["IMB"], "__file__": str(ROOT / "qgis_plugin/ftth_demo0/panel.py"),
-        "QgsProject": SimpleNamespace(instance=lambda: SimpleNamespace(title=lambda: "Project A"))}
-    exec(compile(ast.Module(body=methods, type_ignores=[]), "panel-review-methods", "exec"), namespace)
-    class StandIn:
-        register = namespace["register"]
-        registered_project = namespace["registered_project"]
-        registration_callback = namespace["registration_callback"]
-        form_inputs = namespace["form_inputs"]
-        data_revision = 0
-        view_generation = 0
-        session = "session-A"
-        session_project = None
-        sources = {"IMB": SimpleNamespace(text=lambda: "IMB.shp")}
-        sublayers = {"IMB": SimpleNamespace(text=lambda: "")}
-        recognition = SimpleNamespace(text=lambda: "")
-        project_label = SimpleNamespace(setText=lambda _: None)
-        status = SimpleNamespace(setText=lambda _: None)
-        data_status = SimpleNamespace(setText=lambda _: None)
-        def workspace(self): return tmp_path
-        def route(self, suffix): return f"/sessions/{self.session}/{suffix}"
-        def api(self, method, route, payload, callback):
-            requests.append((route, payload, callback))
-    requests = []
-    panel = StandIn()
-    panel.register()
-    panel.session = "session-B"
-    panel.view_generation += 1
-    requests[0][2]({"id": "project-A", "name": "Project A"})
-    assert requests[1][0] == "/sessions/session-A/project"
-    assert requests[1][1] == {"project_id": "project-A"}

@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from backend.workflow import Intent
-from test_workflow import fixture, IntentModel
+from test_workflow import fixture
 from test_service import setup_service
 
 
@@ -136,37 +136,3 @@ def test_cancel_queued_work_updates_child_and_parent_states(tmp_path):
     assert service.store.get('task', w['task_id'])['status'] == 'cancelled'
     assert service.store.get('worker', 'algorithm:' + w['run_id'])['status'] == 'cancelled'
     assert service.coordinator.active(item['session_id'], 'p') is None
-
-
-def test_discussion_does_not_revoke_existing_execution_choice(tmp_path):
-    from backend.models import WorkflowChoice
-    service, controller, item, _ = fixture(tmp_path, conflict=True)
-    waiting, _ = asyncio.run(controller.start(item))
-    query = {**item, 'id':'question', 'content':'解释一下当前数据'}
-    controller.model = IntentModel(action='query')
-    asyncio.run(controller.start(query))
-    resumed = controller.resolve(item['session_id'], waiting['id'], WorkflowChoice(
-        request_id='choose', option_id='formal_only', version=waiting['version']))
-    assert resumed['status'] == 'submitted'
-    assert len(service.store.all('run')) == 1
-
-
-def test_repair_ownership_transfer_rolls_back_with_failed_child_write(tmp_path):
-    import sqlite3
-    from test_review import fixture_run, approved_review
-    service, sid, _, run, _ = fixture_run(tmp_path)
-    w = {'id':'root-workflow', 'session_id':sid, 'status':'reviewing', 'run_id':run['id']}
-    run['workflow_id'] = w['id']
-    service.store.put('run', run)
-    service.store.put('workflow', w)
-    session = service.store.get('session', sid)
-    session['latest_workflow_id'] = w['id']
-    service.store.put('session', session)
-    evidence, result, review = approved_review(service, run)
-    service.store.db.execute("CREATE TRIGGER reject_child BEFORE INSERT ON events WHEN json_extract(NEW.data, '$.type')='run' BEGIN SELECT RAISE(ABORT, 'injected'); END")
-    service.store.db.commit()
-    with pytest.raises(sqlite3.IntegrityError):
-        service.submit_repair(run['id'], review['id'], evidence.repair_patch(result))
-    assert service.store.get('workflow', w['id']) == w
-    assert service.store.get('run', run['id'])['repair_count'] == 0
-    assert len(service.store.all('run')) == 1

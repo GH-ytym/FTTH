@@ -3,7 +3,6 @@
 Arguments: directory containing IMB/SITE/PTECH/INFRASTRUCTURE.shp, roads GPKG.
 No live backend requests or planning jobs are made.
 """
-import json
 import sys
 from pathlib import Path
 
@@ -21,25 +20,20 @@ source, roads = sys.argv[1:3]
 p = Panel(None)
 p.timer.stop()
 calls = []
-p.api = lambda method, path, payload=None, callback=None, quiet=False: calls.append((method, path, payload))
-def no_local_config():
-    raise AssertionError("Registration must not create a plugin-side configuration")
-p.workspace = no_local_config
-assert not hasattr(p, "import_config")
+def api(method, path, payload=None, callback=None, quiet=False, on_error=None):
+    calls.append((method,path,payload,callback))
+p.api=api
+p.session='test-session'
+assert not hasattr(p, 'import_config') and not hasattr(p, 'register')
 for name in p.sources:
-    p.sources[name].setText(str(Path(source) / (name + ".shp")))
-assert p.data_dirty
+    p.sources[name].setText(str(Path(source) / (name + '.shp')))
 p.recognition.setText(roads)
-p.message.setText("开始完整规划")
-p.send()
-assert not calls, "Unsaved inputs must not submit against the old project"
-p.register()
-assert len(calls) == 1 and calls[0][1] == "/projects", p.data_status.text()
-payload = calls[0][2]
-assert payload["recognition_path"] == roads
-assert "config_path" not in payload
-assert set(payload["sources"]) == {"IMB", "SITE", "PTECH", "INFRASTRUCTURE"}
-print("PAYLOAD=" + json.dumps(payload, ensure_ascii=False))
-print("PASS: select individual files -> prevent stale submit -> register paths without local JSON")
-p.deleteLater()
-app.processEvents()
+p.message.setText('开始完整规划');p.send()
+assert len(calls)==1 and calls[0][1].endswith('/data')
+payload=calls[0][2]
+assert payload['recognition_path']==roads and set(payload['sources'])=={'IMB','SITE','PTECH','INFRASTRUCTURE'}
+assert 'config_path' not in payload
+calls[0][3]({'revision':1})
+assert len(calls)==2 and calls[1][1].endswith('/messages')
+p.shutdown();p.close();app.processEvents()
+print('PASS: choose raw sources -> autosave draft -> send after acknowledgement, without config JSON')

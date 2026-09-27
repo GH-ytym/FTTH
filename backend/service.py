@@ -12,13 +12,14 @@ import subprocess
 import time
 from pathlib import Path
 
-from .models import Parameters, PolicyInput, RunInput
+from .models import Parameters, PolicyInput
 from .settings import ROOT, VENDOR
 from .store import uid
 from .progress import algorithm_step
 from .instance_lock import DataDirectoryLock
 from .titles import valid_title, fallback_title
 from .coordinator import TaskCoordinator
+from .data_drafts import DataDrafts
 
 logger = logging.getLogger("ftth.service")
 
@@ -60,7 +61,7 @@ def run_summary(run):
             "result": summary}
 
 
-class Service:
+class Service(DataDrafts):
     def __init__(self, settings, store):
         self.settings, self.store = settings, store
         self.instance_lock = DataDirectoryLock(settings.data)
@@ -142,7 +143,7 @@ class Service:
         quote = auth.get('evidence_quote', '')
         if (workflow.get('session_id') != session_id or workflow.get('message_id') != message_id or
             workflow.get('project_id') != message.get('project_id') or workflow['status'] not in states or
-            auth.get('source') != 'user_request' or action not in {'plan', 'export', 'display', 'cancel'} or
+            auth.get('source') != 'user_request' or action not in {'plan', 'export', 'display', 'cancel', 'review'} or
             auth.get('action') != action or intent.get('action') != action or intent.get('multiple_plans') or
             auth.get('request_content') != message.get('content') or not quote.strip() or
             quote not in message.get('content', '') or quote != intent.get('evidence_quote')):
@@ -152,9 +153,6 @@ class Service:
             if (task['revision'] != workflow.get('task_revision') or task['mode'] != 'execute' or
                 task['current_message_id'] != message_id or task['status'] in {'cancelled', 'superseded', 'interrupted'}):
                 raise ValueError('任务目标已变化或仅允许讨论，不能使用旧任务执行授权')
-        for name in PolicyInput.model_fields:
-            if parameters and parameters.get(name) and not session.get("policy", {}).get(name):
-                raise ValueError("尚未确认工程策略：" + name + "。请在数据页勾选并保存本会话策略；模型不能代替用户确认。")
 
     def owned_run(self, session_id, run_id):
         run = self.store.get("run", run_id)
@@ -231,8 +229,15 @@ class Service:
             config = read_json(Path(project["config_path"]))
             inputs = {layer["name"]: {"path": layer.get("source", ""), "source_layer": layer.get("source_layer", "")}
                       for layer in config.get("vector_layers", []) if layer.get("source_type") != "empty"}
-        return {"project_id": project["id"], "name": project["name"], **project["summary"],
+        return {"project_id": project["id"], "name": project.get("name", "项目"), **project.get("summary", {}),
                 "recognition_path": project.get("recognition_path"), "inputs": inputs}
+
+    @staticmethod
+    def default_policy(project):
+        roads = bool(project.get('recognition_path'))
+        return {'use_recognition_roads': roads,
+                'use_formal_infrastructure': not roads and bool(project['summary'].get('infrastructure_count')),
+                'split_oversized_imbs': True}
 
     def resolve(self, session_id, request):
         session = self.store.get("session", session_id)
@@ -246,7 +251,7 @@ class Service:
                 raise ValueError("只能继承规划任务")
             values = copy.deepcopy(base["parameters"])
             scope = request.scope or base["scope"]
-        values.update(session.get('policy', {}))
+        values.update(self.default_policy(self.store.get('project', session['project_id'])))
         values.update(request.parameter_overrides)
         parameters = Parameters.model_validate(values).model_dump()
         project = self.store.get("project", session["project_id"])
@@ -259,11 +264,41 @@ class Service:
             if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != expected:
                 raise ValueError("输入快照已改变，请重新登记数据：" + relative)
 
+    async def ensure_input_preflight(self, project):
+        """Upgrade legacy snapshots with read-only checks; never recopy input files."""
+        if not hasattr(self, '_preflight_locks'):
+            self._preflight_locks = {}
+        async with self._preflight_locks.setdefault(project['id'], asyncio.Lock()):
+            project = self.store.get('project', project['id'])
+            if project.get('hashes'):
+                self.verify_snapshot(project)
+            existing = project.get('summary', {}).get('rule_preflight', {})
+            if existing.get('version') == 'ftth-input-preflight-v1':
+                return existing
+            if not project.get('config_path'):
+                raise ValueError('数据快照没有配置记录，请重新选择原始数据。')
+            self.verify_snapshot(project)
+            directory = Path(project['config_path']).parent
+            command = [str(ROOT / 'scripts/qgis_worker.py'), 'preflight', project['config_path']]
+            if project.get('recognition_path'):
+                command.append(project['recognition_path'])
+            code, output = await self.process(command, directory / 'preflight-rules.log')
+            report = parse_result(output, 'DEMO_RESULT=')
+            if code or report.get('version') != 'ftth-input-preflight-v1':
+                raise ValueError('输入预检未完成，未启动规划算法；请检查 QGIS 数据读取。')
+            self.verify_snapshot(project)
+            project['summary']['rule_preflight'] = report
+            self.store.put('project', project)
+            write_json(directory / 'preflight_rules.json', report)
+            return report
+
     def validate(self, session_id, request):
         from .knowledge import FULL_NRO_COUNT, capabilities
         project, scope, p = self.resolve(session_id, request)
         summary = project["summary"]
-        errors = []
+        preflight = summary.get('rule_preflight', {})
+        errors = [r['description'] + ('：' + '、'.join(r.get('object_ids', [])) if r.get('object_ids') else '')
+                  for r in preflight.get('results', []) if r['severity'] == 'error']
         if not summary["imb_count"]:
             errors.append("缺少 IMB 需求点")
         if p["spatial_weight"] == p["pipe_weight"] == 0:
@@ -279,7 +314,9 @@ class Service:
             errors.append("未登记识别结果 GPKG")
         return {"valid": not errors, "errors": errors, "scope": scope, "parameters": p,
                 "check_level": "input_preflight", "feasibility_checked": False, "capabilities": capabilities(),
-                "warnings": ["当前算法的最终导出要求恰好两个 PM 分区；实际限制以执行报告为准。"]}
+                "rule_preflight": preflight,
+                "warnings": [r['description'] for r in preflight.get('results', []) if r['severity'] == 'warning'] +
+                    ["当前算法的最终导出要求恰好两个 PM 分区；实际限制以执行报告为准。"]}
 
     def submit(self, session_id, request, *, agent_message_id=None):
         if agent_message_id:
@@ -292,7 +329,7 @@ class Service:
         if not checked["valid"]:
             raise ValueError("；".join(checked["errors"]))
         with self.store.lock:
-            # Recheck within the same lock used by automatic repair creation.
+            # Deduplicate submissions atomically.
             existing = self.store.dedup(session_id, "run:" + request.request_id)
             if existing:
                 return self.owned_run(session_id, existing)
@@ -305,13 +342,10 @@ class Service:
                 self.set_policy(session_id, PolicyInput(**{k: p[k] for k in PolicyInput.model_fields}))
                 session = self.store.get("session", session_id)
             message = self.store.get("message", agent_message_id) if agent_message_id else {}
-            allowed = bool(message.get("allow_auto_repair")) if agent_message_id else request.allow_auto_repair
             run = {"id": uid("run"), "session_id": session_id, "project_id": project["id"], "kind": "planning",
                    "status": "queued", "scope": scope, "parameters": p, "base_run_id": request.base_run_id, "created": time.time(),
-                   "allow_auto_repair": allowed, "repair_count": 0,
                    "authorization": {"source": "message" if agent_message_id else "manual", "message_id": agent_message_id,
                        "policy_version": session.get("policy_version", 0), "project_id": project["id"], "input_hashes": project.get("hashes", {})}}
-            run["repair_root_id"] = run["id"]
             session["latest_planning_id"] = run["id"]
             objects = [('session', session)]
             if agent_message_id:
@@ -333,75 +367,6 @@ class Service:
                 self.coordinator.sync_workflow(workflow)
             self.spawn(self.execute(run["id"]))
         return run
-
-    def repair_authorized(self, root):
-        session = self.store.get("session", root["session_id"])
-        auth = root.get("authorization", {})
-        if root.get('workflow_id') and session.get('latest_workflow_id') != root['workflow_id']:
-            raise ValueError('已有后续规划请求，禁止旧任务自动重算')
-        if (not root.get("allow_auto_repair") or root.get("workflow_cancelled") or
-            session.get("latest_planning_id") != root["id"] or
-            session.get("policy_version", 0) != auth.get("policy_version") or
-            session.get("project_id") != auth.get("project_id")):
-            raise ValueError("自动重算未授权、已取消、策略改变或已被后续规划取代")
-        if auth.get("source") == "message":
-            self.authorize_agent(root["session_id"], auth["message_id"], root["parameters"])
-            if not self.store.get("message", auth["message_id"]).get("allow_auto_repair"):
-                raise ValueError("原消息的自动重算授权已撤销")
-        project = self.store.get("project", root["project_id"])
-        if not auth.get("input_hashes") or auth["input_hashes"] != project.get("hashes"):
-            raise ValueError("输入快照身份不匹配")
-        self.verify_snapshot(project)
-
-    def submit_repair(self, run_id, review_id, patch):
-        from .review import LIMITS, Evidence, ReviewResult
-        with self.store.lock:
-            root = self.store.get("run", run_id)
-            if root.get("repair_parent_id") or root.get("repair_count", 0) or root.get("scope") != "full":
-                raise ValueError("一次自动重算额度已使用或任务不适用")
-            self.repair_authorized(root)
-            review = self.store.get("review", review_id)
-            if review["run_id"] != run_id or not review.get("automatic") or review["status"] != "completed":
-                raise ValueError("审查不能授权此运行的修复")
-            evidence = Evidence(self, root)
-            evidence.verify()
-            if evidence.digest != review.get("evidence", {}).get("digest"):
-                raise ValueError("审查证据版本不匹配")
-            accepted_patch = evidence.repair_patch(ReviewResult.model_validate(review["result"]))
-            if patch != accepted_patch:
-                raise ValueError("修复补丁与已验证审查不一致")
-            if not patch:
-                raise ValueError("空参数补丁")
-            for name, value in patch.items():
-                old = root["parameters"].get(name)
-                valid = (name == "ga_refine" and old is False and value is True) or (
-                    name in LIMITS and type(value) is int and old < value <= min(2 * old, LIMITS[name]))
-                if not valid:
-                    raise ValueError("自动重算参数越界：" + name)
-            request = RunInput(request_id="repair:" + run_id, base_run_id=run_id, parameter_overrides=patch)
-            checked = self.validate(root["session_id"], request)
-            if not checked["valid"]:
-                raise ValueError("修复参数未通过输入校验")
-            child = {"id": uid("run"), "session_id": root["session_id"], "project_id": root["project_id"],
-                "kind": "planning", "status": "queued", "scope": "full", "parameters": checked["parameters"],
-                "base_run_id": run_id, "repair_parent_id": run_id, "repair_root_id": run_id,
-                "repair_review_id": review_id, "repair_parameter_patch": patch,
-                "repair_count": 1, "allow_auto_repair": False, "authorization": root["authorization"], "created": time.time()}
-            root.update(repair_count=1, repair_child_id=child["id"])
-            repair_objects = [("run", root), ("run", child)]
-            if root.get('workflow_id'):
-                child['workflow_id'] = root['workflow_id']
-                child['task_context'] = copy.deepcopy(root.get('task_context'))
-                workflow = self.store.get('workflow', root['workflow_id'])
-                workflow.update(active_run_id=child['id'], repair_run_id=child['id'], status='running')
-                repair_objects.append(('workflow', workflow))
-            self.store.publish_objects(repair_objects, root["session_id"], "run", run_id=child["id"], status="queued")
-            if root.get('workflow_id'):
-                self.store.event(root['session_id'], 'workflow', workflow=workflow)
-                self.coordinator.worker('algorithm', child, workflow)
-                self.coordinator.sync_workflow(workflow)
-        self.spawn(self.execute(child["id"]))
-        return child
 
     def review_finished(self, review):
         if self.on_review and not self.closing:
@@ -484,23 +449,13 @@ class Service:
             if run["status"] != "queued":
                 return
             if run.get('workflow_id') and not run.get('repair_parent_id'):
-                session = self.store.get('session', run['session_id'])
                 workflow = self.store.get('workflow', run['workflow_id'])
-                if workflow['status'] in {'cancelled', 'interrupted'} or session.get('policy_version', 0) != run['authorization']['policy_version']:
+                if workflow['status'] in {'cancelled', 'interrupted'}:
                     run.update(status='cancelled', error='工作流已取消或策略版本已变化')
                     self.store.put('run', run)
                     self.coordinator.worker('algorithm' if run['kind'] == 'planning' else 'exporter', run, workflow)
                     if self.workflows:
                         self.workflows.publish(workflow, status='cancelled', detail=run['error'], options=[])
-                    return
-            if run.get("repair_parent_id"):
-                try:
-                    self.repair_authorized(self.store.get("run", run["repair_parent_id"]))
-                except ValueError as exc:
-                    run.update(status="cancelled", error=str(exc))
-                    self.store.publish_objects([("run", run)], run["session_id"], "run", run_id=run_id, status="cancelled")
-                    if self.reviewer:
-                        self.reviewer.enqueue(run["session_id"], run_id, "automatic:" + run_id, automatic=True)
                     return
             directory = self.settings.data / "runs" / run_id
             directory.mkdir(parents=True)
@@ -523,6 +478,12 @@ class Service:
                             "；运行 `ftth doctor --fix` 安装到应用目录后重试")
                     project = self.store.get("project", run["project_id"])
                     self.verify_snapshot(project)
+                    self.store.event(run['session_id'], 'algorithm', run_id=run_id, label='运行前固定规则预检', status='running')
+                    preflight = await self.ensure_input_preflight(project)
+                    if preflight['status'] == 'FAIL':
+                        raise ValueError('输入预检不通过，未启动规划算法：' + '；'.join(r['description'] for r in preflight['results'] if r['severity'] == 'error'))
+                    self.store.event(run['session_id'], 'algorithm', run_id=run_id, label='运行前固定规则预检', status='finished', elapsed_seconds=0)
+                    project = self.store.get('project', run['project_id'])
                     write_json(directory / "input_snapshot.json", project)
                     shutil.copy2(VENDOR / "algorithm_integrity_manifest.json", directory / "algorithm_integrity_manifest.json")
                     write_json(directory / "request.json", run)

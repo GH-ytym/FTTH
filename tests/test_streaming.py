@@ -1,4 +1,3 @@
-from conftest import authorize_message
 """Real OpenAI SSE adapter -> agent callbacks -> persisted HTTP events."""
 import asyncio
 import json
@@ -10,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.app import create_app
 from backend.model_client import build_model
-from backend.models import PolicyInput, RunInput
 from backend.settings import Settings
 from backend.store import Store
 from test_service import setup_service, use_host_python
@@ -104,25 +102,6 @@ def test_message_and_event_rollback_together(tmp_path):
     store.db.close()
 
 
-def test_allowed_execution_still_requires_independent_project_policy(tmp_path):
-    async def scenario():
-        service, sid, other = setup_service(tmp_path)
-        service.spawn = lambda coro: coro.close()
-        authorize_message(service, sid, "m")
-        request = RunInput(request_id="r", parameter_overrides={"use_formal_infrastructure": True, "split_oversized_imbs": True})
-        with pytest.raises(ValueError, match="尚未确认工程策略"):
-            service.submit(sid, request, agent_message_id="m")
-        service.set_policy(other, PolicyInput(use_formal_infrastructure=True, split_oversized_imbs=True))
-        with pytest.raises(ValueError, match="尚未确认工程策略"):
-            service.submit(sid, request, agent_message_id="m")
-        service.set_policy(sid, PolicyInput(use_formal_infrastructure=True, split_oversized_imbs=True))
-        assert service.submit(sid, request, agent_message_id="m")["status"] == "queued"
-        service.set_policy(sid, PolicyInput())
-        with pytest.raises(ValueError, match="路由来源|尚未确认工程策略"):
-            service.submit(sid, RunInput(request_id="r2", base_run_id=service.store.all("run")[0]["id"]), agent_message_id="m")
-        await service.close()
-        service.store.db.close()
-    asyncio.run(scenario())
 
 
 def test_shutdown_during_process_creation_reaps_child(tmp_path):
