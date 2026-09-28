@@ -9,8 +9,11 @@ sys.path[:0] = [str(ROOT / 'qgis_plugin'), str(ROOT / 'vendor/ftth')]
 from task_bridge import prepare_qgis_runtime
 handles = prepare_qgis_runtime()
 from qgis.core import QgsApplication
-from qgis.PyQt.QtWidgets import QWidget
+from qgis.PyQt.QtWidgets import QWidget, QScrollArea
+from qgis.PyQt.QtCore import Qt, QPoint
+from qgis.PyQt.QtTest import QTest
 from ftth_demo0.panel import Panel
+from qfluentwidgets import themeColor
 
 app = QgsApplication([], False)
 app.initQgis()
@@ -36,6 +39,27 @@ p.show_data()
 for _ in range(4):
     app.processEvents()
 p.data_popup.grab().save(str(ROOT / 'runtime/data-popup-preview.png'))
+assert themeColor().name() == '#3a83f7'
+bar = p.data_popup.findChild(QScrollArea).verticalScrollBar()
+assert bar.maximum() > 0
+point = QPoint(bar.width() // 2, 15)
+QTest.mouseMove(p.data_popup, QPoint(3, 3))
+app.processEvents()
+assert bar.grab().toImage().pixelColor(point).name() == '#ededed'
+QTest.mouseMove(bar, point)
+app.processEvents()
+assert bar.grab().toImage().pixelColor(point).name() == '#585a5b'
+QTest.mousePress(bar, Qt.LeftButton, pos=point)
+app.processEvents()
+assert bar.grab().toImage().pixelColor(point).name() == '#585a5b'
+QTest.mouseRelease(bar, Qt.LeftButton, pos=point)
+QTest.mouseMove(p.data_popup, QPoint(3, 3))
+app.processEvents()
+assert bar.grab().toImage().pixelColor(point).name() == '#ededed'
+from ftth_demo0.fluent_ui import FluentScrollBar
+for fluent_bar in p.findChildren(FluentScrollBar):
+    assert fluent_bar.groove.upButton.isHidden() and fluent_bar.groove.downButton.isHidden()
+    assert fluent_bar.handle.lightColor.name() == '#ededed'
 assert p.data_status.isHidden()
 p.data_status.setText('保存失败：offline')
 assert not p.data_status.isHidden()

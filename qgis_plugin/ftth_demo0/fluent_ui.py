@@ -1,6 +1,7 @@
 """Fluent presentation layer, embedded in the existing QGIS dock."""
 import sys
 import time
+import re
 from pathlib import Path
 
 from . import connection
@@ -10,14 +11,61 @@ vendor = str(Path(__file__).parent / "_vendor")
 if vendor not in sys.path:
     sys.path.append(vendor)
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QTextTable, QTextLength, QColor, QPalette, QIcon, QTextBlockFormat
-from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton)
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QObject, QEvent, QMimeData, QSize
+from qgis.PyQt.QtGui import QTextTable, QTextLength, QColor, QPalette, QIcon, QTextBlockFormat, QTextCharFormat, QDesktopServices, QTextFormat, QFont, QTextFrameFormat, QTransform, QTextOption
+from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QTextBrowser, QSizePolicy, QApplication, QAbstractButton, QScrollBar)
 from qfluentwidgets import (PushButton, TransparentPushButton,
-    TransparentToolButton, ToolButton, setCustomStyleSheet,
+    TransparentToolButton, ToolButton, setCustomStyleSheet, setThemeColor,
     LineEdit, TextEdit, ComboBox, SpinBox, DoubleSpinBox, CardWidget,
     ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, SegmentedWidget,
     FluentIcon as FIF, IndeterminateProgressRing, IconWidget)
+from qfluentwidgets.components.widgets.scroll_bar import ScrollBar as FluentScrollBar
+from .presentation import InlineCode, CODE_OBJECT, CODE_TEXT, ActivityDetails, duration
+
+
+SCROLL_STYLE = '''
+QScrollBar:vertical {background:transparent;border:0;width:10px;margin:0;}
+QScrollBar:horizontal {background:transparent;border:0;height:10px;margin:0;}
+QScrollBar::handle:vertical {background:#EDEDED;border-radius:5px;min-height:28px;}
+QScrollBar::handle:horizontal {background:#EDEDED;border-radius:5px;min-width:28px;}
+QScrollBar::handle:hover, QScrollBar::handle:pressed {background:#585A5B;}
+QScrollBar::add-line, QScrollBar::sub-line {border:0;background:transparent;width:0;height:0;}
+QScrollBar::up-arrow, QScrollBar::down-arrow, QScrollBar::left-arrow, QScrollBar::right-arrow {width:0;height:0;image:none;}
+QScrollBar::add-page, QScrollBar::sub-page {background:transparent;}
+'''
+
+
+class ScrollFeedback(QObject):
+    """Style Fluent's painted scrollbars without changing bundled library code."""
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.bar, self.pressed = bar, False
+        bar.setHandleColor(QColor('#EDEDED'), QColor('#EDEDED'))
+        bar.setGrooveColor(QColor('#ffffff'), QColor('#ffffff'))
+        bar.groove.upButton.hide()
+        bar.groove.downButton.hide()
+        bar.installEventFilter(self)
+        bar.handle.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind == QEvent.MouseButtonPress:
+            self.pressed = True
+        elif kind == QEvent.MouseButtonRelease:
+            self.pressed = False
+        if kind in (QEvent.Enter, QEvent.Leave, QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+            active = self.pressed or (kind != QEvent.Leave and self.bar.underMouse())
+            color = QColor('#585A5B' if active else '#EDEDED')
+            self.bar.setHandleColor(color, color)
+        return False
+
+
+def style_scrollbars(widget):
+    for bar in widget.findChildren(QScrollBar):
+        bar.setStyleSheet(SCROLL_STYLE)
+    for bar in widget.findChildren(FluentScrollBar):
+        if not hasattr(bar, '_ftth_feedback'):
+            bar._ftth_feedback = ScrollFeedback(bar)
 
 
 class Pages(QWidget):
@@ -74,9 +122,15 @@ class MarkdownView(QTextBrowser):
         self.setOpenExternalLinks(False)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setStyleSheet("background:transparent; border:none; color:#47515c; font:13px 'Microsoft YaHei'; selection-background-color:#dbeafe;")
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        style_scrollbars(self)
+        self.setStyleSheet("background:transparent; border:none; color:#303336; font:13px 'Microsoft YaHei'; selection-background-color:#dbeafe;")
         self.document().setDocumentMargin(2)
-        self.document().setDefaultStyleSheet("table {border-collapse:collapse;} th,td {padding:6px;border:1px solid #dce3eb;} pre,code {background:#e9edf1; font-family:Consolas;} h1,h2,h3 {color:#303a45;} a {color:#1674ce;text-decoration:none;} strong {font-weight:600;}")
+        self.document().setIndentWidth(20)
+        self.document().setDefaultStyleSheet("table {border-collapse:collapse;} th,td {padding:6px;border:1px solid #e5e7eb;} pre,code {background:#f4f5f6; font-family:Consolas;} h1,h2,h3 {color:#303336;} a {color:#3A83F7;text-decoration:none;} strong {font-weight:600;}")
+        self.code_renderer = InlineCode(self)
+        self.document().documentLayout().registerHandler(CODE_OBJECT, self.code_renderer)
+        self.anchorClicked.connect(lambda url: QDesktopServices.openUrl(url) if url.scheme() in ('https', 'http') else None)
         self.setMarkdown(text)
         for frame in self.document().rootFrame().childFrames():
             if isinstance(frame, QTextTable):
@@ -92,25 +146,45 @@ class MarkdownView(QTextBrowser):
         QTimer.singleShot(0, self.fit)
 
     def setMarkdown(self, text):
+        self.document().blockSignals(True)
         super().setMarkdown(text)
+        inline = set(re.findall(r'(?<!`)`([^`\n]+)`(?!`)', text))
+        chips = []
         # QTextDocument's Markdown importer does not apply paragraph CSS reliably.
         block = self.document().begin()
         while block.isValid():
             cursor = self.textCursor()
             cursor.setPosition(block.position())
             fmt = block.blockFormat()
-            fmt.setLineHeight(155, QTextBlockFormat.ProportionalHeight)
-            fmt.setBottomMargin(5 if block.textList() else 9)
+            fenced = fmt.hasProperty(QTextFormat.BlockCodeFence) or fmt.hasProperty(QTextFormat.BlockCodeLanguage)
+            fmt.setLineHeight(145, QTextBlockFormat.ProportionalHeight)
+            fmt.setTopMargin(0)
+            fmt.setBottomMargin(3 if block.textList() else 11)
+            if fenced:
+                fmt.setLineHeight(125, QTextBlockFormat.ProportionalHeight)
+                fmt.setBottomMargin(0)
+                fmt.setBackground(QColor('#f5f5f5'))
+                fmt.setLeftMargin(10)
+                fmt.setRightMargin(10)
             cursor.setBlockFormat(fmt)
             fragment = block.begin()
             while not fragment.atEnd():
                 part = fragment.fragment()
                 style = part.charFormat()
                 font = style.font()
-                if font.fixedPitch() or any(name in font.family().lower() for name in ('mono', 'consolas', 'courier')):
-                    style.setFontFamily('Consolas')
-                    style.setFontPointSize(9)
-                    style.setBackground(QColor('#e9edf1'))
+                if fenced or font.fixedPitch() or any(name in font.family().lower() for name in ('mono', 'consolas', 'courier')):
+                    if part.text() in inline and len(part.text()) <= 32 and not fenced:
+                        chips.append((part.position(), part.length(), part.text()))
+                    code_font = QFont('Consolas')
+                    code_font.setPixelSize(12)
+                    style.setFont(code_font)
+                    style.setBackground(QColor('#f5f5f5' if fenced else '#ededed'))
+                    cursor.setPosition(part.position())
+                    cursor.setPosition(part.position() + part.length(), cursor.KeepAnchor)
+                    cursor.setCharFormat(style)
+                elif style.isAnchor():
+                    style.setForeground(QColor('#3A83F7'))
+                    style.setFontUnderline(False)
                     cursor.setPosition(part.position())
                     cursor.setPosition(part.position() + part.length(), cursor.KeepAnchor)
                     cursor.setCharFormat(style)
@@ -121,11 +195,42 @@ class MarkdownView(QTextBrowser):
                 fmt = frame.format()
                 fmt.setBorderCollapse(True)
                 fmt.setBorder(.5)
+                fmt.setBorderStyle(QTextFrameFormat.BorderStyle_Solid)
                 fmt.setBorderBrush(QColor('#dce3eb'))
                 fmt.setCellPadding(6)
                 fmt.setCellSpacing(0)
                 fmt.setWidth(QTextLength(QTextLength.PercentageLength, 100))
                 frame.setFormat(fmt)
+        for position, length, source in reversed(chips):
+            cursor = self.textCursor()
+            cursor.setPosition(position)
+            cursor.setPosition(position + length, cursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setObjectType(CODE_OBJECT)
+            fmt.setProperty(CODE_TEXT, source)
+            cursor.insertText('\ufffc', fmt)
+        self.setAccessibleDescription(text)
+        self.document().blockSignals(False)
+        self.fit()
+
+    def createMimeDataFromSelection(self):
+        selection = self.textCursor()
+        mime = QMimeData()
+        mime.setText(self.source_text(selection.selectionStart(), selection.selectionEnd()))
+        return mime
+
+    def toPlainText(self):
+        return self.source_text(0, self.document().characterCount() - 1)
+
+    def source_text(self, start, end):
+        cursor = self.textCursor()
+        parts = []
+        for position in range(start, end):
+            cursor.setPosition(position)
+            cursor.setPosition(position + 1, cursor.KeepAnchor)
+            source = cursor.charFormat().property(CODE_TEXT)
+            parts.append(str(source) if source and cursor.selectedText() == '\ufffc' else cursor.selectedText().replace('\u2029', '\n'))
+        return ''.join(parts)
 
     def loadResource(self, kind, url):
         # Model text is untrusted; do not fetch images or local files in Markdown.
@@ -176,7 +281,7 @@ class Conversation(ScrollArea):
             self.items.insertWidget(self.items.count() - 1, card)
         self.replies[message_id].update_reply(text, status, elapsed)
         if message_id.startswith(('review_report_', 'completion_')):
-            self.replies[message_id].badge.setText('FTTH · 结果总结')
+            self.replies[message_id].badge.setText('结果总结')
         if at_bottom and not message_id.startswith(("completion_", "review_report_", "check_")):
             self.scroll_timer.start(0)
 
@@ -288,8 +393,7 @@ class Conversation(ScrollArea):
             toggle = TransparentPushButton("执行中…", widget)
             toggle.setStyleSheet("QPushButton {text-align:left;border:none;background:transparent;color:#7a8592;padding:3px;}")
             hover_feedback(toggle)
-            detail = BodyLabel("", widget)
-            detail.setWordWrap(True)
+            detail = ActivityDetails(widget)
             detail.hide()
             row = QHBoxLayout()
             icon = IconWidget(QIcon(str(Path(__file__).parent / "icons/review-shield.svg")) if role == "review" else FIF.ROBOT if role == "main" else FIF.SETTING, widget)
@@ -300,6 +404,8 @@ class Conversation(ScrollArea):
             ring.setFixedSize(16, 16)
             ring.setStrokeWidth(2)
             row.addWidget(ring)
+            toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            toggle.setFixedHeight(26)
             row.addWidget(toggle, 1)
             layout.addLayout(row)
             layout.addWidget(detail)
@@ -341,6 +447,7 @@ class Conversation(ScrollArea):
     def _toggle_activity(self, state):
         state['expanded'] = not state['expanded']
         state['detail'].setVisible(state['expanded'])
+        self._activity_label(state)
 
     def hide_activity(self, key):
         if key in self.activities:
@@ -352,8 +459,15 @@ class Conversation(ScrollArea):
     def _activity_label(self, state):
         seconds = state["elapsed"] if state["elapsed"] is not None else time.monotonic() - state["start"]
         label = "执行中" if state["status"] == "running" else {"failed":"执行失败", "interrupted":"已中断", "cancelled":"已取消"}.get(state["status"], "已完成")
-        current = state["lines"][-1] if state["lines"] else label
-        state["toggle"].setText(f"{current} · {seconds:.1f} 秒  ﹀")
+        name = {'main': '处理', 'review': '独立审查', 'algorithm': '规划计算', 'service': '数据检查'}.get(state['role'], '处理')
+        caption = f"{name}中" if state['status'] == 'running' else ('已处理' if state['role'] == 'main' and state['status'] == 'succeeded' else name + ' · ' + label)
+        state['toggle'].setToolTip(state['lines'][-1] if state['lines'] else caption)
+        state["toggle"].setText(f"{caption} {duration(seconds)}")
+        chevron = FIF.ARROW_DOWN.icon(color=QColor('#8b8d91')).pixmap(12, 12)
+        if state['expanded']:
+            chevron = chevron.transformed(QTransform().rotate(180))
+        state['toggle'].setIcon(QIcon(chevron))
+        state['toggle'].setIconSize(QSize(12, 12))
 
 
 class LiveReply(QWidget):
@@ -366,7 +480,7 @@ class LiveReply(QWidget):
         box.setContentsMargins(0, 6, 0, 6)
         box.setSpacing(8)
         self.badge = CaptionLabel(self)
-        self.badge.setStyleSheet("color:#2675bf;font:12px 'Microsoft YaHei';")
+        self.badge.setStyleSheet("color:#96989c;font:12px 'Microsoft YaHei';padding-bottom:5px;border-bottom:1px solid #eeeeee;")
         box.addWidget(self.badge)
         self.view = MarkdownView("", self)
         self.view.hide()
@@ -406,12 +520,11 @@ class LiveReply(QWidget):
         if self.status in ("queued", "running"):
             action = "等待处理" if self.status == "queued" else ("正在输出" if self.current_text else "正在处理")
             dots = ("·", "··", "···")[self.frame % 3]
-            self.badge.setText(f"FTTH  {dots}  {action}  ·  {time.monotonic() - self.started:.1f} 秒")
+            self.badge.setText(f"{action} {dots}  {duration(time.monotonic() - self.started)}")
         else:
             label = {"succeeded":"回复完成", "failed":"回复未完成", "interrupted":"回复已中断"}.get(self.status, self.status)
-            duration = f" · {self.elapsed:.1f} 秒" if self.elapsed is not None else ""
-            self.badge.setText("FTTH  ·  " + label + duration)
-            self.badge.setStyleSheet("color:#778595;font:12px 'Microsoft YaHei';")
+            elapsed = f" · {duration(self.elapsed)}" if self.elapsed is not None else ""
+            self.badge.setText(label + elapsed)
 
 
 def button(text, callback, primary=False, icon=None):
@@ -472,6 +585,7 @@ def white_surface(widget):
 
 
 def build_ui(p, business_layers):
+    setThemeColor('#3A83F7')
     p.setObjectName("FtthFluentPanel")
     white_surface(p)
     p.setAttribute(Qt.WA_StyledBackground, True)
@@ -616,3 +730,4 @@ def build_ui(p, business_layers):
                 'QToolButton:pressed:enabled, QPushButton:pressed:enabled {background:#202a34;border-radius:16px;}')
     setCustomStyleSheet(p.send_button, send_css, send_css)
     p.send_button.setStyleSheet(send_css)
+    style_scrollbars(p)

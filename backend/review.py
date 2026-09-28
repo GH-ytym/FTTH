@@ -20,6 +20,7 @@ from .models import StrictModel
 from .model_client import build_model
 from .store import uid
 from .review_chain import prepare_checks
+from .review_wording import describe_rule
 
 logger = logging.getLogger("ftth.review")
 SEARCH_REASONS = {"no_legal_capacity_feasible_candidate", "no_joint_capacity_feasible_combination"}
@@ -343,7 +344,7 @@ class Evidence:
             if group["counts"].get("fail"):
                 examples = [x for x in group["examples"] if x["status"] == "fail"]
                 mandatory.append(Finding(category="contract", severity="error", evidence_ids=["workbook_checks"],
-                    description=("规则 " + group["rule_id"] + "：" + "；".join(x["description"] + ("；实测 " + json.dumps(x.get("totals") or x.get("measured_overlaps"), ensure_ascii=False) if x.get("totals") or x.get("measured_overlaps") else "") for x in examples))[:2000],
+                    description=describe_rule(group['rule_id'], examples),
                     rule_ids=[group["rule_id"]],
                     object_ids=[str(o) for x in examples for o in x.get("object_ids", [])][:100],
                     suggestion="查看规则工具明细与来源单元格；这是成果交付检查，不会自动重跑算法。"))

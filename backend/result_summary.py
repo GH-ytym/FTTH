@@ -7,7 +7,7 @@ def summarize(run, review=None):
     state = {'succeeded': '已完成', 'failed': '失败', 'cancelled': '已取消',
              'interrupted': '已中断'}.get(run['status'], '处理中')
     stamp = datetime.fromtimestamp(run.get('created', 0)).strftime('%m-%d %H:%M')
-    lines = [f"{action}{state} · {stamp}\n批次：{run['id']}"]
+    lines = [f"**{action}{state}**", f"{stamp} · 批次 `{run['id']}`"]
     if run.get('error'):
         lines.append(str(run['error']))
     metrics = run.get('metrics') or {}
@@ -25,17 +25,20 @@ def summarize(run, review=None):
     if review['status'] == 'completed':
         verdict = {'pass': '通过', 'needs_review': '有待复核事项', 'fail': '发现校验错误',
                    'insufficient_evidence': '证据不足'}.get(result.get('verdict'), '待复核')
-        lines.append('审查完成 · ' + verdict)
+        lines.append('**审查完成 · ' + verdict + '**')
         findings = result.get('findings', [])
         counts = {s: sum(f.get('severity') == s for f in findings) for s in ('error', 'warning', 'info')}
         lines.append(f"{counts['error']} 项错误、{counts['warning']} 项警告、{counts['info']} 项提醒")
         for severity, label, limit in [('error', '错误', None), ('warning', '警告', 3), ('info', '提醒', 2)]:
             items = [f for f in findings if f.get('severity') == severity]
+            bullets = []
             for item in items[:limit]:
                 text = f"- **{label}**：{item['description']}"
-                if item.get('suggestion'):
+                if item.get('suggestion') and not item['suggestion'].startswith('查看规则工具明细与来源单元格'):
                     text += '\n  建议：' + item['suggestion']
-                lines.append(text)
+                bullets.append(text)
+            if bullets:
+                lines.append('\n'.join(bullets))
             if limit and len(items) > limit:
                 lines.append(f'另有 {len(items) - limit} 项{label}，见审查报告。')
         if not findings and result.get('summary'):
