@@ -1,5 +1,16 @@
 # 验证记录
 
+## 0.8.0（2026-09-29）
+
+- 后端完整回归：205 passed、2 skipped；ruff PASS。前端状态归并测试 3 passed；TypeScript 与 Vite 生产构建 PASS。
+- npm audit（包含开发依赖）：0 vulnerabilities；Vite 6.4.3、Vitest 4.1.11。
+- 实际 QGIS 运行时中的 QtWebEngine 生产页面：导航、真实 HTTP 消息、刷新恢复、表格/代码复制按钮、360px 无横向溢出、危险链接/越权动作拦截、令牌不进入 DOM，PASS。源码与安装后的插件均通过；脚本 scripts/verify_web_ui.py --installed，截图 runtime/release-0.8.0/web-*.png。正文夹具用于排版，不代表实际规划结果。
+- QGIS 3.44.14，Qt 5.15.13，PyQtWebEngine 5.15.7；doctor 冻结算法 64 个文件哈希 PASS。
+- 原始 51IMB CSV 尝试注册被现行合同校验拒绝（IMB/SITE/PTECH/INFRASTRUCTURE 缺少合同字段）。未修改业务数据绕过校验；本次真实完整规划、地图与导出 E2E 未通过验收。
+- 当前终端未配置真实模型，真实模型效果未测。中文输入法人工操作、其他平台 WebEngine 和全部交互竞态仍需补充实测。
+- 插件已备份至 `runtime/plugin-backups/ftth_demo0-20260929-094518`，0.8.0 已安装到 QGIS default profile；ZIP 清单及 SHA-256 核对通过。
+- 原后台 0.7.0 继续运行，未终止用户进程；升级后需重启后端与 QGIS。
+
 ## 0.5.0（2026-09-26）
 
 - 最终回归：**95 passed, 1 skipped**。跳过项是当前 Windows 环境没有创建符号链接的权限；目录越界、文件哈希篡改及输入快照变更检查均已执行。

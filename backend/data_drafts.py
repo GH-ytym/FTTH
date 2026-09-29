@@ -34,6 +34,10 @@ class DataDrafts:
                            recognition_path=spec.recognition_path or None, updated=time.time(), status='saved')
             session = self.store.get('session', sid)
             session['data_draft'] = current
+            session.update(policy={'use_formal_infrastructure': True, 'use_recognition_roads': True,
+                                   'split_oversized_imbs': True},
+                           policy_confirmed_at=time.time(), policy_version=session.get('policy_version', 0) + 1,
+                           policy_source='data_draft_defaults', policy_data_revision=current['revision'])
             self.store.put('session', session)
             return copy.deepcopy(current)
 

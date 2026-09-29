@@ -72,7 +72,7 @@ def main():
                     assert decision.action in expected, receipt['intent_cases'][-1]
             service = client.app.state.service
             service.store.put('message', {'id':'old-report','session_id':sid,'notification':True,'status':'succeeded','response':'旧结果已通过，无需运行。'*5000})
-            client.post(f'/sessions/{sid}/messages', json={'request_id':'workflow', 'content':'沿用当前已保存的工程策略，执行一次完整规划，完成后独立审查；如果符合受限修复条件，允许自动重算一次。只简短告诉我结果。', 'allow_auto_repair':True}).raise_for_status()
+            client.post(f'/sessions/{sid}/messages', json={'request_id':'workflow', 'content':'沿用当前已保存的工程策略，执行一次完整规划，完成后独立审查；如果符合受限修复条件，允许自动重算一次。只简短告诉我结果。'}).raise_for_status()
             deadline = time.monotonic()+120
             while time.monotonic()<deadline:
                 flows = client.get(f'/sessions/{sid}/history').json().get('workflows', [])
@@ -91,7 +91,7 @@ def main():
             assert client.post(path,json=choice).json()['run_id']==rid
             receipt['workflow_id'] = workflow['id']
         else:
-            response = client.post(f"/sessions/{sid}/runs", json={"request_id": "baseline", "allow_auto_repair": True,
+            response = client.post(f"/sessions/{sid}/runs", json={"request_id": "baseline",
                 "scope": "full", "parameter_overrides": {"use_formal_infrastructure": True, "split_oversized_imbs": True}})
             assert response.status_code == 202, response.text
             rid = response.json()["id"]

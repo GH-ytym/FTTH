@@ -1,6 +1,6 @@
 [project]
 name = "ftth-demo0"
-version = "0.7.0"
+version = "0.8.0"
 description = "FTTH planning agent backend for the QGIS desktop plugin"
 requires-python = ">=3.12,<3.13"
 dependencies = [

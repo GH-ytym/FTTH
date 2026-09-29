@@ -11,8 +11,14 @@ def test_partial_draft_versions_and_snapshot_reuse(tmp_path):
         service.data_draft(sid)
         saved = service.save_data_draft(sid, DataDraftInput(revision=0, sources={'IMB': {'path': 'new.shp'}}))
         assert saved['revision'] == 1
+        session = service.store.get('session', sid)
+        assert session['policy'] == {'use_formal_infrastructure': True, 'use_recognition_roads': True,
+                                     'split_oversized_imbs': True}
+        assert session['policy_data_revision'] == saved['revision']
+        version = session['policy_version']
         with pytest.raises(DraftConflict):
             service.save_data_draft(sid, DataDraftInput(revision=0))
+        assert service.store.get('session', sid)['policy_version'] == version
         calls = []
         async def register(spec):
             calls.append(spec)

@@ -51,6 +51,22 @@ def test_saved_policy_is_inherited_and_current_request_creates_one_run(tmp_path)
     assert service.store.get('run', w['run_id'])['parameters']['use_formal_infrastructure']
 
 
+def test_data_page_defaults_survive_planning_preparation(tmp_path):
+    service, controller, item, _ = fixture(tmp_path, conflict=True)
+    project = service.store.get('project', 'p')
+    project['recognition_path'] = 'roads.gpkg'
+    service.store.put('project', project)
+    session = service.store.get('session', item['session_id'])
+    session['policy_source'] = 'data_draft_defaults'
+    version = session['policy_version']
+    service.store.put('session', session)
+    w, _ = asyncio.run(controller.start(item))
+    assert w['status'] == 'submitted'
+    params = service.store.get('run', w['run_id'])['parameters']
+    assert all(params[k] for k in ('use_formal_infrastructure', 'use_recognition_roads', 'split_oversized_imbs'))
+    assert service.store.get('session', item['session_id'])['policy_version'] == version
+
+
 @pytest.mark.parametrize('roads,formal', [(True, True), (True, False), (False, True)])
 def test_default_routing_prefers_roads_and_falls_back_to_infra(tmp_path, roads, formal):
     service, controller, item, _ = fixture(tmp_path)

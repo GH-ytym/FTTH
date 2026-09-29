@@ -251,7 +251,10 @@ class Service(DataDrafts):
                 raise ValueError("只能继承规划任务")
             values = copy.deepcopy(base["parameters"])
             scope = request.scope or base["scope"]
-        values.update(self.default_policy(self.store.get('project', session['project_id'])))
+        if session.get('policy_source') == 'data_draft_defaults':
+            values.update(session['policy'])
+        else:
+            values.update(self.default_policy(self.store.get('project', session['project_id'])))
         values.update(request.parameter_overrides)
         parameters = Parameters.model_validate(values).model_dump()
         project = self.store.get("project", session["project_id"])

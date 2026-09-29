@@ -15,7 +15,7 @@ from .models import QgisStateInput, DataDraftInput, AckInput, DisplayInput, Expo
 from .review import ReviewController
 from .service import Service, run_summary
 from .settings import Settings
-from .store import Store
+from .store import Store, RequestConflict
 from .titles import fallback_title
 
 logger = logging.getLogger("ftth.app")
@@ -58,10 +58,14 @@ def create_app(settings=None, model=None, review_model=None, on_shutdown_request
     async def value_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    @app.exception_handler(RequestConflict)
+    async def request_conflict(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.get("/health")
     def health():
         qgis = settings.runtime_status()
-        return {"status": "ok", "version": __version__, "execution_authority": "user_request", "context_protocol": "task-v1", "knowledge_protocol": "source-v1", "model_configured": settings.model_ready, "model": settings.model,
+        return {"status": "ok", "version": __version__, "ui_protocol": "web-v1", "capabilities": ["history-page", "cancel-turn", "workflow-revision"], "execution_authority": "user_request", "context_protocol": "task-v1", "knowledge_protocol": "source-v1", "model_configured": settings.model_ready, "model": settings.model,
                 "model_api": settings.model_api, "provider": settings.provider,
                 "qgis_python_exists": qgis["available"], "qgis": qgis}
 
@@ -131,6 +135,45 @@ def create_app(settings=None, model=None, review_model=None, on_shutdown_request
     def check_report(sid: str, cid: str):
         return app.state.service.owned_check(sid, cid)
 
+    @app.post("/sessions/{sid}/checks")
+    async def check_data(sid: str):
+        service = app.state.service
+        return await service.check_data(sid, expected_revision=service.data_draft(sid)['revision'])
+
+    @app.post('/sessions/{sid}/messages/{mid}/cancel')
+    async def cancel_turn(sid: str, mid: str):
+        return await app.state.agent.cancel_turn(sid, mid)
+
+    @app.get('/sessions/{sid}/history-page')
+    def history_page(sid: str, before: int = 0):
+        if before < 0:
+            raise ValueError('历史游标无效')
+        with store.lock:
+            session = store.get('session', sid)
+            rows = store.db.execute("SELECT rowid FROM objects WHERE kind='message' AND json_extract(data,'$.session_id')=? "
+                "AND COALESCE(json_extract(data,'$.notification'),0)=0 AND (?=0 OR rowid<?) ORDER BY rowid DESC LIMIT 31", (sid,before,before)).fetchall()
+            low = rows[min(len(rows),30)-1][0] if rows else 0
+            messages = [json.loads(r[0]) for r in store.db.execute("SELECT data FROM objects WHERE kind='message' "
+                "AND json_extract(data,'$.session_id')=? AND rowid>=? AND (?=0 OR rowid<?) ORDER BY rowid", (sid,low,before,before))]
+            for m in messages:
+                m.pop('request_digest', None)
+                if m.get('notification'):
+                    m.pop('content', None)
+            mids = {m['id'] for m in messages}
+            mid_values = list(mids)
+            placeholders = ','.join('?' for _ in mid_values) or "''"
+            workflows = [json.loads(r[0]) for r in store.db.execute(
+                f"SELECT data FROM objects WHERE kind='workflow' AND json_extract(data,'$.session_id')=? AND json_extract(data,'$.message_id') IN ({placeholders})", [sid,*mid_values])]
+            rids = [w.get('active_run_id',w.get('run_id')) for w in workflows if w.get('run_id')]
+            refs = ','.join('?' for _ in rids) or "''"
+            activity = [dict(id=r[0], **json.loads(r[1])) for r in store.db.execute(
+                f"SELECT id,data FROM events WHERE session=? AND json_extract(data,'$.type') IN ('work','activity','algorithm','run','review') AND "
+                f"(json_extract(data,'$.message_id') IN ({placeholders}) OR json_extract(data,'$.run_id') IN ({refs})) ORDER BY id DESC LIMIT 500", [sid,*mid_values,*rids])]
+            activity.reverse()
+            cursor = store.db.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE session=?',(sid,)).fetchone()[0]
+            return {'session': session, 'messages': messages, 'workflows': workflows, 'activities': activity,
+                'cursor': cursor, 'next_before': low if len(rows)>30 else None}
+
     @app.get("/sessions/{sid}/history")
     def history(sid: str):
         with store.lock:
@@ -183,11 +226,19 @@ def create_app(settings=None, model=None, review_model=None, on_shutdown_request
         return app.state.service.inspect(sid)
 
     @app.post("/sessions/{sid}/validate")
-    def validate(sid: str, spec: RunInput):
+    async def validate(sid: str, spec: RunInput):
+        service = app.state.service
+        draft = service.data_draft(sid)
+        if draft.get('sources') and draft.get('snapshot_revision') != draft['revision']:
+            await service.prepare_data(sid, draft['revision'])
         return app.state.service.validate(sid, spec)
 
     @app.post("/sessions/{sid}/runs", status_code=202)
     async def run(sid: str, spec: RunInput):
+        service = app.state.service
+        draft = service.data_draft(sid)
+        if draft.get('sources') and draft.get('snapshot_revision') != draft['revision']:
+            await service.prepare_data(sid, draft['revision'])
         return app.state.service.submit(sid, spec)
 
     @app.get("/sessions/{sid}/runs/{rid}/reviews")

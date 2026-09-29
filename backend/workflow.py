@@ -89,8 +89,10 @@ class WorkflowController:
         return w
 
     def publish(self, w, **changes):
-        w.update(changes, updated=time.time())
-        self.store.publish_objects([('workflow', w)], w['session_id'], 'workflow', workflow=w)
+        with self.store.lock:
+            saved = self.store.lookup('workflow', w['id']) or {}
+            w.update(changes, updated=time.time(), revision=max(w.get('revision', 0), saved.get('revision', 0)) + 1)
+            self.store.publish_objects([('workflow', w)], w['session_id'], 'workflow', workflow=w)
         self.coordinator.sync_workflow(w)
         return w
 
@@ -198,7 +200,9 @@ class WorkflowController:
                 result = self.prepare(w)
             return result, result['detail']
         except asyncio.CancelledError:
-            self.publish(w, status='interrupted', detail='任务已中断，不会自动重放', options=[])
+            saved = self.store.get('workflow', w['id'])
+            if saved['status'] != 'cancelled':
+                self.publish(w, status='interrupted', detail='任务已中断，不会自动重放', options=[])
             raise
         except Exception as exc:
             # Model exceptions may contain secrets. Do not store their text;
@@ -263,8 +267,9 @@ class WorkflowController:
                 receipt = self.service.show(sid, base)
                 return self.publish(w, status='completed', display=receipt, detail='已请求展示，等待 QGIS 回执。')
             overrides = dict(intent.get('parameter_overrides') or {})
-            policy = self.service.default_policy(project)
-            self.service.set_policy(sid, PolicyInput(**policy))
+            if session.get('policy_source') != 'data_draft_defaults':
+                policy = self.service.default_policy(project)
+                self.service.set_policy(sid, PolicyInput(**policy))
             session = self.store.get('session', sid)
             spec = RunInput(request_id=w['id'], scope=intent['scope'], base_run_id=base, parameter_overrides=overrides)
             checked = self.service.validate(sid, spec)

@@ -77,3 +77,7 @@ Desktop.ini
 
 # Keep uv.lock, bundled _vendor sources/licenses, algorithm manifests,
 # config templates and bundled sample GIS files under version control.
+
+# React build tooling
+frontend/node_modules/
+setup.log.full

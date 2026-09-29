@@ -34,6 +34,10 @@ MIGRATIONS = (
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
+class RequestConflict(ValueError):
+    pass
+
+
 class Store:
     def __init__(self, path):
         self.lock = threading.RLock()
@@ -69,6 +73,28 @@ class Store:
             self.db.commit()
         return item
 
+    def commit_message(self, session, item, key, digest):
+        """An accepted turn and its idempotency receipt have one crash boundary."""
+        with self.lock, self.db:
+            row = self.db.execute('SELECT value FROM requests WHERE session=? AND key=?', (session['id'], key)).fetchone()
+            if row:
+                previous = self.get('message', row[0])
+                if previous.get('request_digest', digest) != digest or previous['content'] != item['content']:
+                    raise RequestConflict('请求编号已用于其他消息')
+                return previous, False
+            item['request_digest'] = digest
+            current = self.lookup('session', session['id']) or session
+            current['updated'] = session['updated'] if 'updated' in session else time.time()
+            if not current.get('title') or current['title'] == '新对话':
+                current['title'] = session.get('title', '新对话')
+            session = current
+            for kind, obj in [('message', item), ('session', session)]:
+                self.db.execute(UPSERT, (kind, obj['id'], json.dumps(obj, ensure_ascii=False)))
+            self.db.execute('INSERT INTO requests VALUES (?,?,?)', (session['id'], key, item['id']))
+            self.db.execute('INSERT INTO events(session,data) VALUES (?,?)', (session['id'], json.dumps(
+                dict(type='user', time=time.time(), message_id=item['id'], text=item['content']), ensure_ascii=False)))
+            return item, True
+
     def commit_action(self, session, owner, action, digest, run, objects, request_key):
         """Claim and durable business effects share one SQLite transaction."""
         with self.lock, self.db:
@@ -80,6 +106,9 @@ class Store:
                 return self.get('run', row[1]), False
             self.db.execute('INSERT INTO workflow_actions VALUES (?,?,?,?,?)', (session, owner, action, digest, run['id']))
             for kind, item in [('run', run), *objects]:
+                if kind == 'workflow':
+                    previous = self.lookup(kind, item['id']) or {}
+                    item.update(revision=max(previous.get('revision',0),item.get('revision',0))+1,updated=time.time())
                 self.db.execute(UPSERT, (kind, item['id'], json.dumps(item, ensure_ascii=False)))
             self.db.execute('INSERT INTO requests VALUES (?,?,?)', (session, request_key, run['id']))
             self.db.execute('INSERT INTO events(session,data) VALUES (?,?)', (session, json.dumps(dict(type='run', time=time.time(), run_id=run['id'], status='queued'))))
@@ -127,7 +156,7 @@ class Store:
             for kind, data in events:
                 self.db.execute("INSERT INTO events(session,data) VALUES (?,?)",
                     (item["session_id"], json.dumps(dict(type=kind, time=time.time(),
-                        message_id=item["id"], **data), ensure_ascii=False)))
+                        message_id=item["id"], **({k:item[k] for k in ("run_id","review_id","workflow_id") if k in item} | data)), ensure_ascii=False)))
             if any(kind == "assistant" for kind, _ in events):
                 # Each stream event holds the cumulative text, so keeping them
                 # grows quadratically with reply length. The final reply event

@@ -2,7 +2,9 @@
 
 基于 **QGIS 桌面插件 + 主 Agent + 独立审查 Agent + 独立算法进程** 的 FTTH 光纤接入网规划工作空间。通过中文对话检查数据、提交规划、调整参数、比较方案，在 QGIS 中展示和导出成果。
 
-当前版本 **0.7.0**（后端与插件同版本，更新说明见 [RELEASE-0.7.0.md](RELEASE-0.7.0.md)）。面向同机、单用户的 Windows 与 macOS 环境，仍处于实验阶段。
+当前版本 **0.8.0**（后端与插件同版本，更新说明见 [RELEASE-0.8.0.md](RELEASE-0.8.0.md)）。面向同机、单用户的 Windows 与 macOS 环境，仍处于实验阶段。
+
+默认使用离线 React 界面，聊天、数据、运行和设置均通过受限桥接访问 Python 宿主；连接令牌不进入网页。当前保持 0.7.0 的**只读审查，不自动重算**。缺少 WebEngine 时可从插件菜单手动切换旧界面。
 
 ## 功能
 
@@ -17,7 +19,7 @@
 ## 架构
 
 ```text
-QGIS 插件（Qt5 / Fluent UI）
+QGIS 插件（React / TypeScript → QtWebEngine / QWebChannel）
          │ 本机 HTTP + Bearer Token
          ▼
 FastAPI 后端（Python 3.12）
@@ -307,3 +309,24 @@ dist/                       本机构建的插件包（Git 忽略）
 ## 第三方组件
 
 保留 PyQt-Fluent-Widgets、PyQt5-Frameless-Window、darkdetect 的源码、资源及许可证，详见 [THIRD_PARTY.md](qgis_plugin/ftth_demo0/THIRD_PARTY.md)。Qt/PyQt 运行时由 QGIS 提供。第三方组件分别适用原有许可；仓库未为项目原创代码另行声明许可证。
+
+## 0.8.0 前端开发与验收
+
+生产资源已经随插件打包，使用者不需要 Node.js。开发者使用 Node.js 22+：
+
+```powershell
+cd frontend
+npm ci
+npm run build
+npm test -- --run
+cd ..
+uv run python scripts/verify_web_ui.py
+uv run ftth plugin package
+uv run ftth plugin install --update
+```
+
+`npm run build` 输出到 `qgis_plugin/ftth_demo0/web`，目标 Chromium 87。网页需要 QWebChannel 宿主，普通 Vite 浏览器预览不代表完整业务验收。构建资源不包含连接令牌或模型密钥。
+
+本机验证组合为 QGIS 3.44.14、Qt 5.15.13、PyQtWebEngine 5.15.7；OSGeo4W 可安装 `python3-pyqtwebengine`。其他平台的新版 WebEngine 界面尚待实机验收，保留旧 Qt 页面兼容入口。
+
+升级前安装命令自动备份旧插件，已有数据库按原迁移机制备份。升级后重启后端和 QGIS；已运行的 0.7.0 后端不会被安装命令终止。数据页修改后自动保存并检查字段，三项工程策略自动开启并保存；运行页的高级区域支持无模型手动校验与规划。

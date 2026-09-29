@@ -150,24 +150,41 @@ class AgentController:
         self.locks = defaultdict(asyncio.Lock)
         self.workflows = WorkflowController(service, model)
         service.workflows = self.workflows
+        self.turn_tasks = {}
 
     def enqueue(self, session_id, message):
         self.store.get("session", session_id)
-        existing = self.store.dedup(session_id, "message:" + message.request_id)
-        if existing:
-            return self.store.get("message", existing)
         session = self.store.get("session", session_id)
         item = {"id": uid("message"), "session_id": session_id, "content": message.content, "status": "queued", "created": time.time(),
                 "project_id": session.get("project_id"), "data_revision": self.service.data_draft(session_id)["revision"]}
-        self.store.publish_message(item, [("user", {"text": message.content})])
-        self.store.dedup(session_id, "message:" + message.request_id, item["id"])
         session = self.store.get("session", session_id)
         session["updated"] = time.time()
         if not session.get("title") or session["title"] == "新对话":
             session["title"] = fallback_title(message.content)
             item["generate_title"] = True
-        self.store.put("session", session)
-        self.service.spawn(self.respond(item))
+        digest = hashlib.sha256(message.content.encode()).hexdigest()
+        item, created = self.store.commit_message(session, item, 'message:' + message.request_id, digest)
+        if created:
+            task = self.service.spawn(self.respond(item))
+            if task is not None:
+                self.turn_tasks[item['id']] = task
+                task.add_done_callback(lambda _: self.turn_tasks.pop(item['id'], None))
+        return item
+
+    async def cancel_turn(self, sid, mid):
+        item = self.store.get('message', mid)
+        if item['session_id'] != sid:
+            raise ValueError('消息不属于当前会话')
+        if item.get('workflow_id'):
+            await self.workflows.cancel(sid, item['workflow_id'])
+        task = self.turn_tasks.get(mid)
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        item = self.store.get('message', mid)
+        if item['status'] in {'queued', 'running', 'interrupted'}:
+            item.update(status='cancelled', response=item.get('partial_response', '') + '\n\n本轮已停止。')
+            self.store.publish_message(item, [('assistant', {'text': item['response'], 'status':'cancelled'})])
         return item
 
     def completed(self, run):
